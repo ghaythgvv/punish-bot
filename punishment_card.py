@@ -12,6 +12,7 @@ FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
 TYPE_STYLE = {
     "WARNING": ((255, 176, 32), 33),
     "MUTE": ((255, 138, 61), 55),
+    "TIMEOUT": ((255, 92, 240), 45),
     "KICK": ((255, 77, 109), 78),
     "BAN": ((255, 23, 68), 100),
 }
