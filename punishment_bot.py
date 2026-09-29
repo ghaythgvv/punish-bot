@@ -1,12 +1,13 @@
 """
 ELT Punishment Bot
 =======================================
-Slash commands (/warn, /mute, /kick, /ban) so staff get Discord's own UI — a
-member picker, typed fields, and built-in validation/permission gating — instead
-of typing raw text commands. Wraps punishment_gif.py's render_card_gif() to post an
-ANIMATED punishment card with the target's own avatar and display name, plus a
-"View Punishment Details" button underneath. If the animated card can't be made
-for any reason, it falls back to the still PNG card from punishment_card.py.
+Slash commands (/warn, /mute, /timeout, /kick, /ban) so staff get Discord's own
+UI — a member picker, typed fields, and built-in validation/permission gating —
+instead of typing raw text commands. Wraps punishment_gif.py's render_card_gif()
+to post an ANIMATED punishment card with the target's own avatar and display
+name, plus a "View Punishment Details" button underneath. If the animated card
+can't be made for any reason, it falls back to the still PNG card from
+punishment_card.py.
 
 Commands (each is invisible in Discord's / menu to anyone without the matching
 permission — Discord itself hides it, not just this code):
@@ -32,6 +33,11 @@ Before running:
       OAuth2 scopes — slash commands don't register without the second one.
     - Put your token in the DISCORD_TOKEN environment variable (Railway's
       Variables tab), not directly in this file.
+    - IMPORTANT: the bot's own role in Server Settings > Roles must sit ABOVE
+      the highest role of anyone you want to mute/timeout/kick/ban. If it
+      doesn't, Discord rejects the action with a 403 Forbidden — this is
+      checked below (needs_bot_rank) so you get a clear message instead of a
+      silent failure, but you still have to fix the role order yourself.
 """
 
 import io
@@ -260,6 +266,15 @@ async def issue_punishment(interaction: discord.Interaction, member: discord.Mem
     )
 
 
+async def reject(interaction: discord.Interaction, command: str, target: discord.Member, msg: str):
+    """Sends the ephemeral rejection AND logs it — target_problem() and
+    discord.Forbidden used to only send the ephemeral reply, which made every
+    role-hierarchy or permission rejection completely invisible in Railway's
+    logs. This is the fix: every rejection now shows up here too."""
+    print(f"🚫 /{command}: {interaction.user} -> {target} blocked: {msg}")
+    await interaction.followup.send(f"⚠️ {bold(msg)}", ephemeral=True)
+
+
 # setup_hook runs once at startup. (on_ready can fire again after every reconnect,
 # which would re-sync the commands each time.)
 @bot.event
@@ -288,7 +303,7 @@ async def warn_cmd(interaction: discord.Interaction, member: discord.Member, rea
     await interaction.response.defer(ephemeral=True)
     problem = target_problem(interaction, member, needs_bot_rank=False)
     if problem:
-        return await interaction.followup.send(f"⚠️ {bold(problem)}", ephemeral=True)
+        return await reject(interaction, "warn", member, problem)
     await issue_punishment(interaction, member, "WARNING", reason)
 
 
@@ -301,12 +316,13 @@ async def mute_cmd(interaction: discord.Interaction, member: discord.Member, min
     await interaction.response.defer(ephemeral=True)
     problem = target_problem(interaction, member)
     if problem:
-        return await interaction.followup.send(f"⚠️ {bold(problem)}", ephemeral=True)
+        return await reject(interaction, "mute", member, problem)
     try:
         await member.timeout(timedelta(minutes=minutes), reason=audit_reason(reason, "muted", interaction.user))
     except discord.Forbidden:
-        return await interaction.followup.send(f"⚠️ {bold('I do not have permission to time out that member.')}", ephemeral=True)
+        return await reject(interaction, "mute", member, "I do not have permission to time out that member.")
     except discord.HTTPException as e:
+        print(f"❌ /mute HTTPException for {member}: {e}")
         return await interaction.followup.send(f"⚠️ {bold('Failed to mute:')} {e}", ephemeral=True)
     await issue_punishment(interaction, member, "MUTE", f"{reason} (for {minutes}m)")
 
@@ -325,15 +341,16 @@ async def timeout_cmd(interaction: discord.Interaction, member: discord.Member, 
     await interaction.response.defer(ephemeral=True)
     duration = timedelta(**{unit.value: amount})
     if duration > timedelta(days=28):
-        return await interaction.followup.send(f"⚠️ {bold('Discord only allows timeouts up to 28 days.')}", ephemeral=True)
+        return await reject(interaction, "timeout", member, "Discord only allows timeouts up to 28 days.")
     problem = target_problem(interaction, member)
     if problem:
-        return await interaction.followup.send(f"⚠️ {bold(problem)}", ephemeral=True)
+        return await reject(interaction, "timeout", member, problem)
     try:
         await member.timeout(duration, reason=audit_reason(reason, "timed out", interaction.user))
     except discord.Forbidden:
-        return await interaction.followup.send(f"⚠️ {bold('I do not have permission to time out that member.')}", ephemeral=True)
+        return await reject(interaction, "timeout", member, "I do not have permission to time out that member.")
     except discord.HTTPException as e:
+        print(f"❌ /timeout HTTPException for {member}: {e}")
         return await interaction.followup.send(f"⚠️ {bold('Failed to time out:')} {e}", ephemeral=True)
     unit_label = unit.value if amount != 1 else unit.value[:-1]
     await issue_punishment(interaction, member, "TIMEOUT", f"{reason} (for {amount} {unit_label})")
@@ -348,12 +365,13 @@ async def kick_cmd(interaction: discord.Interaction, member: discord.Member, rea
     await interaction.response.defer(ephemeral=True)
     problem = target_problem(interaction, member)
     if problem:
-        return await interaction.followup.send(f"⚠️ {bold(problem)}", ephemeral=True)
+        return await reject(interaction, "kick", member, problem)
     try:
         await member.kick(reason=audit_reason(reason, "kicked", interaction.user))
     except discord.Forbidden:
-        return await interaction.followup.send(f"⚠️ {bold('I do not have permission to kick that member.')}", ephemeral=True)
+        return await reject(interaction, "kick", member, "I do not have permission to kick that member.")
     except discord.HTTPException as e:
+        print(f"❌ /kick HTTPException for {member}: {e}")
         return await interaction.followup.send(f"⚠️ {bold('Failed to kick:')} {e}", ephemeral=True)
     await issue_punishment(interaction, member, "KICK", reason)
 
@@ -367,12 +385,13 @@ async def ban_cmd(interaction: discord.Interaction, member: discord.Member, reas
     await interaction.response.defer(ephemeral=True)
     problem = target_problem(interaction, member)
     if problem:
-        return await interaction.followup.send(f"⚠️ {bold(problem)}", ephemeral=True)
+        return await reject(interaction, "ban", member, problem)
     try:
         await member.ban(reason=audit_reason(reason, "banned", interaction.user))
     except discord.Forbidden:
-        return await interaction.followup.send(f"⚠️ {bold('I do not have permission to ban that member.')}", ephemeral=True)
+        return await reject(interaction, "ban", member, "I do not have permission to ban that member.")
     except discord.HTTPException as e:
+        print(f"❌ /ban HTTPException for {member}: {e}")
         return await interaction.followup.send(f"⚠️ {bold('Failed to ban:')} {e}", ephemeral=True)
     await issue_punishment(interaction, member, "BAN", reason)
 
@@ -384,6 +403,7 @@ async def ban_cmd(interaction: discord.Interaction, member: discord.Member, reas
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingPermissions):
+        print(f"🚫 {interaction.user} tried /{interaction.command.name if interaction.command else '?'} without permission")
         msg = f"⚠️ {bold('You do not have permission to do that.')}"
     else:
         original = getattr(error, "original", error)
