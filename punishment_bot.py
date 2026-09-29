@@ -12,6 +12,7 @@ Commands (each is invisible in Discord's / menu to anyone without the matching
 permission — Discord itself hides it, not just this code):
     /warn member reason
     /mute member minutes reason
+    /timeout member amount unit reason
     /kick member reason
     /ban  member reason
 
@@ -308,6 +309,34 @@ async def mute_cmd(interaction: discord.Interaction, member: discord.Member, min
     except discord.HTTPException as e:
         return await interaction.followup.send(f"⚠️ {bold('Failed to mute:')} {e}", ephemeral=True)
     await issue_punishment(interaction, member, "MUTE", f"{reason} (for {minutes}m)")
+
+
+@bot.tree.command(name="timeout", description="Time a member out for minutes, hours or days and log a timeout card.", guild=discord.Object(id=GUILD_ID))
+@app_commands.describe(member="The member being timed out", amount="How long (a number)", unit="Minutes, hours or days", reason="Why they're being timed out")
+@app_commands.choices(unit=[
+    app_commands.Choice(name="Minutes", value="minutes"),
+    app_commands.Choice(name="Hours", value="hours"),
+    app_commands.Choice(name="Days", value="days"),
+])
+@app_commands.guild_only()
+@app_commands.default_permissions(moderate_members=True)
+@app_commands.checks.has_permissions(moderate_members=True)
+async def timeout_cmd(interaction: discord.Interaction, member: discord.Member, amount: app_commands.Range[int, 1, 40320], unit: app_commands.Choice[str], reason: app_commands.Range[str, 1, 300]):
+    await interaction.response.defer(ephemeral=True)
+    duration = timedelta(**{unit.value: amount})
+    if duration > timedelta(days=28):
+        return await interaction.followup.send(f"⚠️ {bold('Discord only allows timeouts up to 28 days.')}", ephemeral=True)
+    problem = target_problem(interaction, member)
+    if problem:
+        return await interaction.followup.send(f"⚠️ {bold(problem)}", ephemeral=True)
+    try:
+        await member.timeout(duration, reason=audit_reason(reason, "timed out", interaction.user))
+    except discord.Forbidden:
+        return await interaction.followup.send(f"⚠️ {bold('I do not have permission to time out that member.')}", ephemeral=True)
+    except discord.HTTPException as e:
+        return await interaction.followup.send(f"⚠️ {bold('Failed to time out:')} {e}", ephemeral=True)
+    unit_label = unit.value if amount != 1 else unit.value[:-1]
+    await issue_punishment(interaction, member, "TIMEOUT", f"{reason} (for {amount} {unit_label})")
 
 
 @bot.tree.command(name="kick", description="Kick a member and log a kick card.", guild=discord.Object(id=GUILD_ID))
