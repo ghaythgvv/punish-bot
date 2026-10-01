@@ -8,9 +8,8 @@ ANIMATED punishment card with the target's own avatar and display name, plus a
 "View Punishment Details" button underneath. If the animated card can't be made
 for any reason, it falls back to the still PNG card from punishment_card.py.
 
-Who can use the commands: server Administrators, anyone with one of the staff
-roles in STAFF_ROLE_IDS (see CONFIG), or anyone who has the matching Discord
-permission (Manage Messages / Timeout Members / Kick Members / Ban Members).
+Who can use the commands: server Administrators, anyone with the lowest staff
+role in STAFF_ROLE_IDS (e.g. mod), or anyone whose highest role sits above it.
 
 Requirements:
     pip install discord.py Pillow     (discord.py 2.4 or newer)
@@ -102,15 +101,15 @@ def audit_reason(reason: str, action: str, by: discord.abc.User) -> str:
 
 
 def staff_only(permission: str):
-    """Lets through Administrators, members with a role in STAFF_ROLE_IDS, and
-    members who have the matching Discord permission."""
+    """Lets through Administrators, and members whose highest role is the lowest
+    staff role in STAFF_ROLE_IDS (e.g. mod) or any role above it."""
 
     async def predicate(interaction: discord.Interaction) -> bool:
         user = interaction.user
-        perms = user.guild_permissions
-        if perms.administrator or getattr(perms, permission, False):
+        if user.guild_permissions.administrator:
             return True
-        if any(role.id in STAFF_ROLE_IDS for role in user.roles):
+        staff_roles = [r for r in (interaction.guild.get_role(i) for i in STAFF_ROLE_IDS) if r]
+        if staff_roles and user.top_role >= min(staff_roles):
             return True
         raise app_commands.MissingPermissions([permission])
 
