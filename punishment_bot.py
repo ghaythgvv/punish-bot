@@ -8,8 +8,11 @@ ANIMATED punishment card with the target's own avatar and display name, plus a
 "View Punishment Details" button underneath. If the animated card can't be made
 for any reason, it falls back to the still PNG card from punishment_card.py.
 
-Who can use the commands: server Administrators, anyone with the lowest staff
-role in STAFF_ROLE_IDS (e.g. mod), or anyone whose highest role sits above it.
+Who can use the commands:
+    /warn /timeout /kick /ban -> members with the Moderator role (MOD_ROLE_ID) or
+                                 any role ABOVE it, plus server Administrators.
+    /mute                     -> server Administrators, anyone with the lowest staff
+                                 role in STAFF_ROLE_IDS, or anyone above it.
 
 Requirements:
     pip install discord.py Pillow     (discord.py 2.4 or newer)
@@ -46,7 +49,11 @@ GUILD_ID = 1410440666747633707  # ELT server ID — commands sync straight to th
 
 PUNISHMENT_LOG_CHANNEL_ID = None  # channel where punishment cards get posted (None = the channel the command was run in)
 
-# Staff role IDs allowed to use every punishment command (comma separated in the
+# Moderator role. /warn, /timeout, /kick and /ban can be used by members with this
+# role OR any role positioned above it in the server's role list.
+MOD_ROLE_ID = 1513904125086011402
+
+# Staff role IDs allowed to use /mute (comma separated in the
 # STAFF_ROLE_IDS Railway variable). Add your "mod" and "good" role IDs there.
 STAFF_ROLE_IDS = {
     int(x)
@@ -110,6 +117,22 @@ def staff_only(permission: str):
             return True
         staff_roles = [r for r in (interaction.guild.get_role(i) for i in STAFF_ROLE_IDS) if r]
         if staff_roles and user.top_role >= min(staff_roles):
+            return True
+        raise app_commands.MissingPermissions([permission])
+
+    return app_commands.check(predicate)
+
+
+def mod_only(permission: str):
+    """Lets through members with the Moderator role (MOD_ROLE_ID) or any role
+    ABOVE it, plus server Administrators."""
+
+    async def predicate(interaction: discord.Interaction) -> bool:
+        user = interaction.user
+        if user.guild_permissions.administrator:
+            return True
+        mod_role = interaction.guild.get_role(MOD_ROLE_ID)
+        if mod_role and user.top_role >= mod_role:
             return True
         raise app_commands.MissingPermissions([permission])
 
@@ -284,12 +307,13 @@ async def setup_hook():
 async def on_ready():
     print(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
     print(f"👮 Staff role IDs: {sorted(STAFF_ROLE_IDS) or 'none set'}")
+    print(f"🛡️ Moderator role ID: {MOD_ROLE_ID}")
 
 
 @bot.tree.command(name="warn", description="Log a warning card for a member. No Discord action is taken.", guild=discord.Object(id=GUILD_ID))
 @app_commands.describe(member="The member being warned", reason="Why they're being warned")
 @app_commands.guild_only()
-@staff_only("manage_messages")
+@mod_only("manage_messages")
 async def warn_cmd(interaction: discord.Interaction, member: discord.Member, reason: app_commands.Range[str, 1, 300]):
     await interaction.response.defer(ephemeral=True)
     problem = target_problem(interaction, member, needs_bot_rank=False)
@@ -325,7 +349,7 @@ async def mute_cmd(interaction: discord.Interaction, member: discord.Member, min
     app_commands.Choice(name="Days", value="days"),
 ])
 @app_commands.guild_only()
-@staff_only("moderate_members")
+@mod_only("moderate_members")
 async def timeout_cmd(interaction: discord.Interaction, member: discord.Member, amount: app_commands.Range[int, 1, 40320], unit: app_commands.Choice[str], reason: app_commands.Range[str, 1, 300]):
     await interaction.response.defer(ephemeral=True)
     duration = timedelta(**{unit.value: amount})
@@ -348,7 +372,7 @@ async def timeout_cmd(interaction: discord.Interaction, member: discord.Member, 
 @bot.tree.command(name="kick", description="Kick a member and log a kick card.", guild=discord.Object(id=GUILD_ID))
 @app_commands.describe(member="The member being kicked", reason="Why they're being kicked")
 @app_commands.guild_only()
-@staff_only("kick_members")
+@mod_only("kick_members")
 async def kick_cmd(interaction: discord.Interaction, member: discord.Member, reason: app_commands.Range[str, 1, 300]):
     await interaction.response.defer(ephemeral=True)
     problem = target_problem(interaction, member)
@@ -367,7 +391,7 @@ async def kick_cmd(interaction: discord.Interaction, member: discord.Member, rea
 @bot.tree.command(name="ban", description="Ban a member and log a ban card.", guild=discord.Object(id=GUILD_ID))
 @app_commands.describe(member="The member being banned", reason="Why they're being banned")
 @app_commands.guild_only()
-@staff_only("ban_members")
+@mod_only("ban_members")
 async def ban_cmd(interaction: discord.Interaction, member: discord.Member, reason: app_commands.Range[str, 1, 300]):
     await interaction.response.defer(ephemeral=True)
     problem = target_problem(interaction, member)
