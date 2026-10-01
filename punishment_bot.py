@@ -2,46 +2,34 @@
 ELT Punishment Bot
 =======================================
 Slash commands (/warn, /mute, /timeout, /kick, /ban) so staff get Discord's own
-UI — a member picker, typed fields, and built-in validation/permission gating —
-instead of typing raw text commands. Wraps punishment_gif.py's render_card_gif()
-to post an ANIMATED punishment card with the target's own avatar and display
-name, plus a "View Punishment Details" button underneath. If the animated card
-can't be made for any reason, it falls back to the still PNG card from
-punishment_card.py.
+UI — a member picker, typed fields, and built-in validation — instead of typing
+raw text commands. Wraps punishment_gif.py's render_card_gif() to post an
+ANIMATED punishment card with the target's own avatar and display name, plus a
+"View Punishment Details" button underneath. If the animated card can't be made
+for any reason, it falls back to the still PNG card from punishment_card.py.
 
-Commands (each is invisible in Discord's / menu to anyone without the matching
-permission — Discord itself hides it, not just this code):
-    /warn member reason
-    /mute member minutes reason
-    /timeout member amount unit reason
-    /kick member reason
-    /ban  member reason
-
-Why the button: the card's fields are a fixed width and truncate long text with
-"..." (see fit() in punishment_card.py). The button shows the full, untruncated
-reason and names instead of just repeating what's on the image.
+Who can use the commands: server Administrators, anyone with one of the staff
+roles in STAFF_ROLE_IDS (see CONFIG), or anyone who has the matching Discord
+permission (Manage Messages / Timeout Members / Kick Members / Ban Members).
 
 Requirements:
-    pip install discord.py Pillow
+    pip install discord.py Pillow     (discord.py 2.4 or newer)
 
 Before running:
-    - Put punishment_card.py, punishment_gif.py and card_bg.gif (the animated
-      background) in the same folder as this file, with the fonts/ folder next
-      to them.
+    - Put punishment_card.py, punishment_gif.py and card_bg.gif in the same
+      folder as this file, with the fonts/ folder next to them.
     - Enable SERVER MEMBERS INTENT for your bot in the Discord Developer Portal.
-    - When you invite the bot, include BOTH the "bot" and "applications.commands"
-      OAuth2 scopes — slash commands don't register without the second one.
-    - Put your token in the DISCORD_TOKEN environment variable (Railway's
-      Variables tab), not directly in this file.
-    - IMPORTANT: the bot's own role in Server Settings > Roles must sit ABOVE
-      the highest role of anyone you want to mute/timeout/kick/ban. If it
-      doesn't, Discord rejects the action with a 403 Forbidden — this is
-      checked below (needs_bot_rank) so you get a clear message instead of a
-      silent failure, but you still have to fix the role order yourself.
+    - Invite the bot with BOTH the "bot" and "applications.commands" scopes.
+    - Put your token in the DISCORD_TOKEN environment variable (Railway Variables).
+    - Optional: add your staff role IDs in a Railway variable called
+      STAFF_ROLE_IDS (comma separated, e.g. 111,222,333).
+    - IMPORTANT: the bot's own role must sit ABOVE the highest role of anyone you
+      want to mute/timeout/kick/ban, or Discord rejects it with a 403.
 """
 
 import io
 import os
+import re
 import asyncio
 from datetime import timedelta
 
@@ -55,74 +43,82 @@ from punishment_gif import render_card_gif, clean_for_card, MAX_BYTES
 # =========================== CONFIG ===========================
 TOKEN = os.environ.get("DISCORD_TOKEN")
 
-GUILD_ID = 1410440666747633707  # ELT server ID — commands are synced straight to this one guild, so they show up instantly instead of waiting up to an hour for a global sync
+GUILD_ID = 1410440666747633707  # ELT server ID — commands sync straight to this guild so they show up instantly
 
-PUNISHMENT_LOG_CHANNEL_ID = None  # channel where punishment cards get posted (None = post in the channel the command was run in)
+PUNISHMENT_LOG_CHANNEL_ID = None  # channel where punishment cards get posted (None = the channel the command was run in)
+
+# Staff role IDs allowed to use every punishment command (comma separated in the
+# STAFF_ROLE_IDS Railway variable). Add your "mod" and "good" role IDs there.
+STAFF_ROLE_IDS = {
+    int(x)
+    for x in os.environ.get("STAFF_ROLE_IDS", "1513904136783925380").replace(" ", "").split(",")
+    if x.isdigit()
+}
 # ================================================================
 
 intents = discord.Intents.default()
 intents.members = True  # needed to look up/timeout/kick/ban members and read their avatar
-# message_content is NOT needed anymore — slash commands don't read message text
 
-# when_mentioned = the only "prefix" is @bot, so discord.py doesn't complain about the missing
-# message_content intent. bot.tree (the slash commands) is what this project actually uses.
 bot = commands.Bot(command_prefix=commands.when_mentioned, intents=intents)
 
-# Converts plain ASCII letters/digits to Mathematical Sans-Serif Bold Unicode
-# equivalents — e.g. bold('like this') -> '𝗹𝗶𝗸𝗲 𝘁𝗵𝗶𝘀'. Only touches A-Z, a-z, 0-9;
-# spaces, punctuation, and emoji pass through untouched.
-#
-# IMPORTANT: never run this over text that contains a Discord ID — a member
-# mention (<@id>), a channel mention (<#id>), a custom emoji tag (<:name:id>), or
-# a relative timestamp (<t:unix:R>). Converting the digits inside those breaks
-# Discord's parsing of the tag entirely. Only wrap literal label/message text,
-# and keep any such tag concatenated outside the bold() call.
 _BOLD_UPPER_START = 0x1D5D4  # Mathematical Sans-Serif Bold Capital A
 _BOLD_LOWER_START = 0x1D5EE  # Mathematical Sans-Serif Bold Small a
 _BOLD_DIGIT_START = 0x1D7EC  # Mathematical Sans-Serif Bold Digit Zero
 
 
 def bold(text: str) -> str:
+    """Converts A-Z, a-z, 0-9 to Mathematical Sans-Serif Bold. Never run this over
+    text containing a Discord ID (<@id>, <#id>, <:name:id>, <t:unix:R>)."""
     if not text:
         return text
     out = []
     for ch in text:
         code = ord(ch)
-        if 65 <= code <= 90:  # A-Z
+        if 65 <= code <= 90:
             out.append(chr(_BOLD_UPPER_START + (code - 65)))
-        elif 97 <= code <= 122:  # a-z
+        elif 97 <= code <= 122:
             out.append(chr(_BOLD_LOWER_START + (code - 97)))
-        elif 48 <= code <= 57:  # 0-9
+        elif 48 <= code <= 57:
             out.append(chr(_BOLD_DIGIT_START + (code - 48)))
         else:
             out.append(ch)
     return "".join(out)
 
 
-# Case numbers and full (untruncated) punishment details, both in memory only —
-# reset if the bot restarts, same as everything else this project has tracked in
-# memory so far. punishment_records[case_no] backs the "View Punishment Details"
-# button; if a case's entry is gone (bot restarted since), the button says so
-# rather than failing silently.
+# Case numbers and full punishment details, in memory only (reset on restart).
 case_counter = 0
 punishment_records = {}
 
 
 def card_name(member: discord.abc.User) -> str:
-    """Name shown on the card: the server display name (nickname if they have one).
-    If that has nothing the card font can draw (emoji-only, Arabic, etc.), use the plain username."""
+    """Name shown on the card: the server display name, or the plain username if
+    the display name has nothing the card font can draw."""
     return clean_for_card(member.display_name) or member.name
 
 
 def audit_reason(reason: str, action: str, by: discord.abc.User) -> str:
-    """Reason text for Discord's audit log. The audit log rejects anything over 512 characters."""
+    """Reason text for Discord's audit log (max 512 characters)."""
     return f"{reason} — {action} by {by}"[:512]
 
 
+def staff_only(permission: str):
+    """Lets through Administrators, members with a role in STAFF_ROLE_IDS, and
+    members who have the matching Discord permission."""
+
+    async def predicate(interaction: discord.Interaction) -> bool:
+        user = interaction.user
+        perms = user.guild_permissions
+        if perms.administrator or getattr(perms, permission, False):
+            return True
+        if any(role.id in STAFF_ROLE_IDS for role in user.roles):
+            return True
+        raise app_commands.MissingPermissions([permission])
+
+    return app_commands.check(predicate)
+
+
 def target_problem(interaction: discord.Interaction, member: discord.Member, needs_bot_rank: bool = True):
-    """Returns a message if this punishment shouldn't go ahead, else None.
-    Without this, a moderator could use the bot (which has a high role) to punish
-    someone above them, or the owner, or themselves."""
+    """Returns a message if this punishment shouldn't go ahead, else None."""
     guild = interaction.guild
     if member.id == interaction.user.id:
         return "You can't punish yourself."
@@ -140,13 +136,13 @@ def target_problem(interaction: discord.Interaction, member: discord.Member, nee
 async def send_with_retry(channel, **kwargs):
     """Send a message with exponential backoff retry logic for rate limits."""
     max_attempts = 5
-    backoff_delays = [1, 2, 4, 8, 16]  # seconds
+    backoff_delays = [1, 2, 4, 8, 16]
 
     for attempt in range(max_attempts):
         try:
             return await channel.send(**kwargs)
         except discord.errors.HTTPException as e:
-            if e.status == 429:  # Rate limited
+            if e.status == 429:
                 if attempt < max_attempts - 1:
                     delay = backoff_delays[attempt]
                     print(f"⏳ Rate limited, retrying in {delay}s (attempt {attempt + 1}/{max_attempts})")
@@ -158,16 +154,28 @@ async def send_with_retry(channel, **kwargs):
                 raise
 
 
-class PunishmentDetailsView(discord.ui.View):
-    """Single 'View Punishment Details' button under the card."""
+class PunishmentDetailsButton(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r"punishment_details_(?P<case>[0-9]+)",
+):
+    """'View Punishment Details' button. Being a DynamicItem, it keeps working
+    after a bot restart instead of showing 'This interaction failed'."""
 
     def __init__(self, case_no: int):
-        super().__init__(timeout=None)
+        super().__init__(
+            discord.ui.Button(
+                label=f"🔍 {bold('View Punishment Details')}",
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"punishment_details_{case_no}",
+            )
+        )
         self.case_no = case_no
-        self.children[0].custom_id = f"punishment_details_{case_no}"
 
-    @discord.ui.button(label=f"🔍 {bold('View Punishment Details')}", style=discord.ButtonStyle.secondary)
-    async def view_details(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match: re.Match):
+        return cls(int(match["case"]))
+
+    async def callback(self, interaction: discord.Interaction):
         record = punishment_records.get(self.case_no)
         if record is None:
             return await interaction.response.send_message(
@@ -176,8 +184,6 @@ class PunishmentDetailsView(discord.ui.View):
             )
 
         color_rgb = TYPE_STYLE[record["type"]][0]
-        # Case number and type are plain formatted text, safe to bold. The <@id>
-        # mentions below are kept outside bold() — see the warning on bold() above.
         embed = discord.Embed(
             title=bold(f"Case #{self.case_no:04d} — {record['type'].title()}"),
             color=discord.Color.from_rgb(*color_rgb),
@@ -191,15 +197,12 @@ class PunishmentDetailsView(discord.ui.View):
 
 async def issue_punishment(interaction: discord.Interaction, member: discord.Member, ptype: str, reason: str):
     """Renders the card with the member's own avatar and posts it with the details
-    button. Called after the actual Discord action (timeout/kick/ban) has already
-    succeeded, or straight away for a warn (which takes no Discord action).
-    Assumes the interaction has already been deferred (ephemeral) by the caller."""
+    button. Assumes the interaction has already been deferred (ephemeral)."""
     global case_counter
     case_counter += 1
     case_no = case_counter
 
     try:
-        # static 256px PNG — also avoids downloading a big animated avatar
         avatar_bytes = await member.display_avatar.replace(size=256, format="png").read()
     except Exception as e:
         print(f"⚠️ Couldn't fetch avatar for {member}: {e}")
@@ -209,8 +212,7 @@ async def issue_punishment(interaction: discord.Interaction, member: discord.Mem
     user_name, punisher_name = card_name(member), card_name(interaction.user)
     max_bytes = min(MAX_BYTES, int(interaction.guild.filesize_limit * 0.9))
 
-    # render_card_gif() / render_card() are CPU-bound Pillow work — offloaded to a
-    # thread so they don't block the bot's event loop (gateway heartbeat, other commands).
+    # CPU-bound Pillow work runs in a thread so it doesn't block the event loop.
     try:
         card_bytes = await asyncio.to_thread(
             render_card_gif, user_name, punisher_name, reason, ptype, case_no, date_text, avatar_bytes, max_bytes
@@ -243,7 +245,8 @@ async def issue_punishment(interaction: discord.Interaction, member: discord.Mem
         log_channel = interaction.channel
 
     file = discord.File(io.BytesIO(card_bytes), filename=f"punishment_case_{case_no:04d}.{ext}")
-    view = PunishmentDetailsView(case_no)
+    view = discord.ui.View(timeout=None)
+    view.add_item(PunishmentDetailsButton(case_no))
 
     try:
         await send_with_retry(log_channel, file=file, view=view)
@@ -256,10 +259,6 @@ async def issue_punishment(interaction: discord.Interaction, member: discord.Mem
         )
         return
 
-    # Ephemeral confirmation — only the staff member who ran the command sees
-    # this, so the channel doesn't fill up with "X was warned" noise on top of
-    # the card itself. member.mention / log_channel.mention stay outside bold()
-    # since they're <@id>/<#id> tags.
     await interaction.followup.send(
         f"✅ {bold(f'{ptype.title()} logged for')} {member.mention} {bold('in')} {log_channel.mention}.",
         ephemeral=True,
@@ -267,18 +266,14 @@ async def issue_punishment(interaction: discord.Interaction, member: discord.Mem
 
 
 async def reject(interaction: discord.Interaction, command: str, target: discord.Member, msg: str):
-    """Sends the ephemeral rejection AND logs it — target_problem() and
-    discord.Forbidden used to only send the ephemeral reply, which made every
-    role-hierarchy or permission rejection completely invisible in Railway's
-    logs. This is the fix: every rejection now shows up here too."""
+    """Sends the ephemeral rejection AND logs it so it shows up in Railway's logs."""
     print(f"🚫 /{command}: {interaction.user} -> {target} blocked: {msg}")
     await interaction.followup.send(f"⚠️ {bold(msg)}", ephemeral=True)
 
 
-# setup_hook runs once at startup. (on_ready can fire again after every reconnect,
-# which would re-sync the commands each time.)
 @bot.event
 async def setup_hook():
+    bot.add_dynamic_items(PunishmentDetailsButton)
     try:
         synced = await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
         print(f"🔄 Synced {len(synced)} slash command(s) to guild {GUILD_ID}")
@@ -289,16 +284,13 @@ async def setup_hook():
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
+    print(f"👮 Staff role IDs: {sorted(STAFF_ROLE_IDS) or 'none set'}")
 
 
-# default_permissions is what makes Discord hide the command from people without
-# the permission; has_permissions is a second lock in case a server admin edits
-# that in Server Settings > Integrations.
 @bot.tree.command(name="warn", description="Log a warning card for a member. No Discord action is taken.", guild=discord.Object(id=GUILD_ID))
 @app_commands.describe(member="The member being warned", reason="Why they're being warned")
 @app_commands.guild_only()
-@app_commands.default_permissions(manage_messages=True)
-@app_commands.checks.has_permissions(manage_messages=True)
+@staff_only("manage_messages")
 async def warn_cmd(interaction: discord.Interaction, member: discord.Member, reason: app_commands.Range[str, 1, 300]):
     await interaction.response.defer(ephemeral=True)
     problem = target_problem(interaction, member, needs_bot_rank=False)
@@ -310,8 +302,7 @@ async def warn_cmd(interaction: discord.Interaction, member: discord.Member, rea
 @bot.tree.command(name="mute", description="Time a member out and log a mute card.", guild=discord.Object(id=GUILD_ID))
 @app_commands.describe(member="The member being muted", minutes="How long to mute them for, in minutes", reason="Why they're being muted")
 @app_commands.guild_only()
-@app_commands.default_permissions(moderate_members=True)
-@app_commands.checks.has_permissions(moderate_members=True)
+@staff_only("moderate_members")
 async def mute_cmd(interaction: discord.Interaction, member: discord.Member, minutes: app_commands.Range[int, 1, 40320], reason: app_commands.Range[str, 1, 300]):
     await interaction.response.defer(ephemeral=True)
     problem = target_problem(interaction, member)
@@ -335,8 +326,7 @@ async def mute_cmd(interaction: discord.Interaction, member: discord.Member, min
     app_commands.Choice(name="Days", value="days"),
 ])
 @app_commands.guild_only()
-@app_commands.default_permissions(moderate_members=True)
-@app_commands.checks.has_permissions(moderate_members=True)
+@staff_only("moderate_members")
 async def timeout_cmd(interaction: discord.Interaction, member: discord.Member, amount: app_commands.Range[int, 1, 40320], unit: app_commands.Choice[str], reason: app_commands.Range[str, 1, 300]):
     await interaction.response.defer(ephemeral=True)
     duration = timedelta(**{unit.value: amount})
@@ -359,8 +349,7 @@ async def timeout_cmd(interaction: discord.Interaction, member: discord.Member, 
 @bot.tree.command(name="kick", description="Kick a member and log a kick card.", guild=discord.Object(id=GUILD_ID))
 @app_commands.describe(member="The member being kicked", reason="Why they're being kicked")
 @app_commands.guild_only()
-@app_commands.default_permissions(kick_members=True)
-@app_commands.checks.has_permissions(kick_members=True)
+@staff_only("kick_members")
 async def kick_cmd(interaction: discord.Interaction, member: discord.Member, reason: app_commands.Range[str, 1, 300]):
     await interaction.response.defer(ephemeral=True)
     problem = target_problem(interaction, member)
@@ -379,8 +368,7 @@ async def kick_cmd(interaction: discord.Interaction, member: discord.Member, rea
 @bot.tree.command(name="ban", description="Ban a member and log a ban card.", guild=discord.Object(id=GUILD_ID))
 @app_commands.describe(member="The member being banned", reason="Why they're being banned")
 @app_commands.guild_only()
-@app_commands.default_permissions(ban_members=True)
-@app_commands.checks.has_permissions(ban_members=True)
+@staff_only("ban_members")
 async def ban_cmd(interaction: discord.Interaction, member: discord.Member, reason: app_commands.Range[str, 1, 300]):
     await interaction.response.defer(ephemeral=True)
     problem = target_problem(interaction, member)
@@ -396,10 +384,6 @@ async def ban_cmd(interaction: discord.Interaction, member: discord.Member, reas
     await issue_punishment(interaction, member, "BAN", reason)
 
 
-# Friendlier error messages for the common cases instead of Discord's generic
-# "This interaction failed." Covers both the case where the command hadn't
-# responded yet (e.g. the permission check itself failed) and where it had
-# already been deferred (an error inside the command body).
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingPermissions):
@@ -416,7 +400,7 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
         else:
             await interaction.response.send_message(msg, ephemeral=True)
     except discord.HTTPException:
-        pass  # interaction token likely expired — nothing more we can do
+        pass
 
 
 if not TOKEN:
