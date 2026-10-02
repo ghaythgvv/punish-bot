@@ -66,6 +66,9 @@ MOD_ROLE_ID = 1513904125086011402
 WARN_1_ROLE_ID = 1513904153900875897
 WARN_2_ROLE_ID = 1513904154719027291
 
+# Members with this role cannot be muted, timed out, or banned.
+PROTECTED_ROLE_ID = 1434612242451529878
+
 # Staff role IDs allowed to use /mute
 STAFF_ROLE_IDS = {
     int(x)
@@ -235,6 +238,10 @@ def mod_only(permission: str):
         raise app_commands.MissingPermissions([permission])
 
     return app_commands.check(predicate)
+
+
+def has_protected_role(member: discord.Member) -> bool:
+    return any(role.id == PROTECTED_ROLE_ID for role in member.roles)
 
 
 def target_problem(
@@ -779,6 +786,7 @@ async def issue_punishment(
     if (
         ptype == "WARNING"
         and warning_count >= 3
+        and not has_protected_role(member)
     ):
 
         try:
@@ -1090,6 +1098,14 @@ async def mute_cmd(
             problem
         )
 
+    if has_protected_role(member):
+        return await reject(
+            interaction,
+            "mute",
+            member,
+            "This member has a protected role and cannot be muted."
+        )
+
     try:
 
         await member.timeout(
@@ -1214,6 +1230,14 @@ async def timeout_cmd(
             "timeout",
             member,
             problem
+        )
+
+    if has_protected_role(member):
+        return await reject(
+            interaction,
+            "timeout",
+            member,
+            "This member has a protected role and cannot be timed out."
         )
 
     try:
@@ -1385,6 +1409,14 @@ async def ban_cmd(
             "ban",
             member,
             problem
+        )
+
+    if has_protected_role(member):
+        return await reject(
+            interaction,
+            "ban",
+            member,
+            "This member has a protected role and cannot be banned."
         )
 
     try:
