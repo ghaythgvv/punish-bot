@@ -1,6 +1,7 @@
 import io
 import math
 import os
+import re
 from functools import lru_cache
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageOps
@@ -157,7 +158,36 @@ def hex_mask(w, h):
     return m
 
 
-def draw_field(img, y, label, value):
+def _wrap(text, f, max_w, max_lines):
+    """Greedy word wrap into at most max_lines lines; the last line gets '...' if text is left over."""
+    words = " ".join((text or "").split()).split(" ") or ["-"]
+    lines, cur = [], ""
+    for wd in words:
+        # a single word wider than the line gets broken by characters
+        while text_w(wd, f) > max_w:
+            k = len(wd)
+            while k > 1 and text_w(wd[:k], f) > max_w:
+                k -= 1
+            if cur:
+                lines.append(cur)
+                cur = ""
+            lines.append(wd[:k])
+            wd = wd[k:]
+        trial = (cur + " " + wd).strip()
+        if text_w(trial, f) <= max_w:
+            cur = trial
+        else:
+            lines.append(cur)
+            cur = wd
+    if cur:
+        lines.append(cur)
+    if len(lines) > max_lines:
+        rest = " ".join(lines[max_lines - 1:])
+        lines = lines[:max_lines - 1] + [fit(rest, f, 0, max_w)]
+    return lines
+
+
+def draw_field(img, y, label, value, wrap=False):
     x0, fw, fh = 300, 560, 54
     bg = lin_grad(px(fw), px(fh), [(0, (42, 17, 74, 255)), (1, (255, 255, 255, 5))], 90)
     m = Image.new("L", bg.size, 0)
@@ -174,7 +204,43 @@ def draw_field(img, y, label, value):
     put_text(img, px(x0 + 25), base, label, lf, (255, 140, 246, 255), sp=3)
     vf = font("Rajdhani", 700, 28)
     max_w = px(fw - 5 - 20 - 20 - 12) - px(label_w)
-    put_text(img, px(x0 + 25 + label_w + 12), base, fit(value, vf, 0, max_w), vf, (243, 234, 255, 255))
+    vx = px(x0 + 25 + label_w + 12)
+    clean = " ".join((value or "").split()) or "-"
+    if wrap and text_w(clean, vf) > max_w:
+        sf = font("Rajdhani", 700, 21)
+        lines = _wrap(clean, sf, max_w, 2)
+        if len(lines) == 2:
+            put_text(img, vx, px(y + 24), lines[0], sf, (243, 234, 255, 255))
+            put_text(img, vx, px(y + 46), lines[1], sf, (243, 234, 255, 255))
+            return
+        clean = lines[0]
+        vf = sf
+    put_text(img, vx, base, fit(clean, vf, 0, max_w), vf, (243, 234, 255, 255))
+
+
+DURATION_RE = re.compile(r"\s*\((for [^)]*)\)\s*$", re.I)
+
+
+def split_reason(reason):
+    """'spam (for 5 minutes)' -> ('spam', '5 minutes'). No duration -> (reason, None)."""
+    m = DURATION_RE.search(reason or "")
+    if not m:
+        return reason, None
+    return (reason[:m.start()].strip() or "-"), m.group(1)[4:].strip()
+
+
+def has_duration(reason):
+    return split_reason(reason)[1] is not None
+
+
+def draw_fields(img, username, punisher, reason):
+    """USER / PUNISHER / REASON (wraps to 2 lines) and, for mute/timeout, a DURATION field."""
+    text, dur = split_reason(reason)
+    draw_field(img, 250, "USER", username)
+    draw_field(img, 324, "PUNISHER", punisher)
+    draw_field(img, 398, "REASON", text, wrap=True)
+    if dur:
+        draw_field(img, 472, "DURATION", dur.upper())
 
 
 def draw_avatar(img, avatar_bytes):
@@ -200,15 +266,66 @@ def draw_avatar(img, avatar_bytes):
     put(img, inner, px(ax + 4), px(ay + 4))
 
 
-def draw_bar(img, sev):
-    bx, by, bw, bh = 44, 404, 220, 8
-    bar = Image.new("RGBA", (px(bw), px(bh)), (42, 26, 69, 255))
-    fill_w = max(1, px(bw * sev / 100))
-    bar.paste(lin_grad(fill_w, px(bh), [(0, (255, 92, 240, 255)), (1, (139, 61, 255, 255))], 90), (0, 0))
-    m = Image.new("L", bar.size, 0)
-    ImageDraw.Draw(m).rounded_rectangle((0, 0, bar.width - 1, bar.height - 1), px(4), fill=255)
-    bar.putalpha(m)
+def draw_bar(img, sev, color=(255, 92, 240)):
+    """Severity bar: glossy rounded fill in the punishment's color, soft glow,
+    segment ticks, a bright end cap and a small label underneath."""
+    bx, by, bw, bh = 44, 402, 220, 12
+    color = tuple(color)
+    W_, H_ = px(bw), px(bh)
+    r = H_ // 2
+
+    fill_w = max(H_, px(bw * sev / 100))
+    rmask = Image.new("L", (W_, H_), 0)
+    ImageDraw.Draw(rmask).rounded_rectangle((0, 0, W_ - 1, H_ - 1), r, fill=255)
+    fmask = Image.new("L", (fill_w, H_), 0)
+    ImageDraw.Draw(fmask).rounded_rectangle((0, 0, fill_w - 1, H_ - 1), r, fill=255)
+
+    # glow behind the filled part
+    pad = px(10)
+    gl = Image.new("L", (W_ + 2 * pad, H_ + 2 * pad), 0)
+    gl.paste(fmask, (pad, pad))
+    gl = gl.filter(ImageFilter.GaussianBlur(px(5))).point(lambda v: int(v * 0.75))
+    glow = Image.new("RGBA", gl.size, color + (0,))
+    glow.putalpha(gl)
+    put(img, glow, px(bx) - pad, px(by) - pad)
+
+    # track
+    bar = Image.new("RGBA", (W_, H_), (30, 16, 52, 255))
+    ImageDraw.Draw(bar).rectangle((0, 0, W_, H_ // 3), fill=(20, 9, 36, 255))
+
+    # fill: dark -> bright gradient, glossy top half
+    dark = tuple(int(c * 0.45) for c in color)
+    fill = lin_grad(fill_w, H_, [(0, dark + (255,)), (1, color + (255,))], 90)
+    fill.alpha_composite(Image.new("RGBA", (fill_w, H_ * 2 // 5), (255, 255, 255, 70)), (0, px(1)))
+    fill.putalpha(ImageChops.multiply(fill.getchannel("A"), fmask))
+    bar.alpha_composite(fill)
+
+    # segment ticks at 25 / 50 / 75 %
+    td = ImageDraw.Draw(bar)
+    for pct in (25, 50, 75):
+        x = px(bw * pct / 100)
+        td.rectangle((x - px(0.6), 0, x + px(0.6), H_), fill=(10, 3, 22, 170))
+
+    # bright end cap
+    ex = fill_w - r
+    cap = Image.new("RGBA", (W_, H_), (0, 0, 0, 0))
+    ImageDraw.Draw(cap).ellipse((ex - px(2.2), r - px(2.2), ex + px(2.2), r + px(2.2)), fill=(255, 255, 255, 235))
+    bar.alpha_composite(cap.filter(ImageFilter.GaussianBlur(px(0.6))))
+
+    bar.putalpha(ImageChops.multiply(bar.getchannel("A"), rmask))
     put(img, bar, px(bx), px(by))
+
+    # thin outline
+    ol = Image.new("RGBA", (W_, H_), (0, 0, 0, 0))
+    ImageDraw.Draw(ol).rounded_rectangle((0, 0, W_ - 1, H_ - 1), r, outline=(139, 61, 255, 110), width=px(1))
+    put(img, ol, px(bx), px(by))
+
+    # label
+    lf = font("Orbitron", 700, 11)
+    base = px(by + bh + 17)
+    put_text(img, px(bx), base, "SEVERITY", lf, (139, 111, 192, 255), sp=3)
+    pct = f"{sev}%"
+    put_text(img, px(bx + bw) - text_w(pct, lf, 2), base, pct, lf, color + (255,), sp=2)
 
 
 def draw_ornament(img, color):
@@ -318,11 +435,9 @@ def render_card(username, punisher, reason, ptype, case_no, date_text, avatar_by
 
     draw_avatar(img, avatar_bytes)
     draw_ornament(img, color)
-    draw_bar(img, sev)
+    draw_bar(img, sev, color)
 
-    draw_field(img, 250, "USER", username)
-    draw_field(img, 324, "PUNISHER", punisher)
-    draw_field(img, 398, "REASON", reason)
+    draw_fields(img, username, punisher, reason)
 
     draw_stamp(img, ptype, color)
 
