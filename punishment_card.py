@@ -280,7 +280,6 @@ def draw_bar(img, sev, color=(255, 92, 240)):
     fmask = Image.new("L", (fill_w, H_), 0)
     ImageDraw.Draw(fmask).rounded_rectangle((0, 0, fill_w - 1, H_ - 1), r, fill=255)
 
-    # glow behind the filled part
     pad = px(10)
     gl = Image.new("L", (W_ + 2 * pad, H_ + 2 * pad), 0)
     gl.paste(fmask, (pad, pad))
@@ -289,24 +288,20 @@ def draw_bar(img, sev, color=(255, 92, 240)):
     glow.putalpha(gl)
     put(img, glow, px(bx) - pad, px(by) - pad)
 
-    # track
     bar = Image.new("RGBA", (W_, H_), (30, 16, 52, 255))
     ImageDraw.Draw(bar).rectangle((0, 0, W_, H_ // 3), fill=(20, 9, 36, 255))
 
-    # fill: dark -> bright gradient, glossy top half
     dark = tuple(int(c * 0.45) for c in color)
     fill = lin_grad(fill_w, H_, [(0, dark + (255,)), (1, color + (255,))], 90)
     fill.alpha_composite(Image.new("RGBA", (fill_w, H_ * 2 // 5), (255, 255, 255, 70)), (0, px(1)))
     fill.putalpha(ImageChops.multiply(fill.getchannel("A"), fmask))
     bar.alpha_composite(fill)
 
-    # segment ticks at 25 / 50 / 75 %
     td = ImageDraw.Draw(bar)
     for pct in (25, 50, 75):
         x = px(bw * pct / 100)
         td.rectangle((x - px(0.6), 0, x + px(0.6), H_), fill=(10, 3, 22, 170))
 
-    # bright end cap
     ex = fill_w - r
     cap = Image.new("RGBA", (W_, H_), (0, 0, 0, 0))
     ImageDraw.Draw(cap).ellipse((ex - px(2.2), r - px(2.2), ex + px(2.2), r + px(2.2)), fill=(255, 255, 255, 235))
@@ -315,12 +310,10 @@ def draw_bar(img, sev, color=(255, 92, 240)):
     bar.putalpha(ImageChops.multiply(bar.getchannel("A"), rmask))
     put(img, bar, px(bx), px(by))
 
-    # thin outline
     ol = Image.new("RGBA", (W_, H_), (0, 0, 0, 0))
     ImageDraw.Draw(ol).rounded_rectangle((0, 0, W_ - 1, H_ - 1), r, outline=(139, 61, 255, 110), width=px(1))
     put(img, ol, px(bx), px(by))
 
-    # label
     lf = font("Orbitron", 700, 11)
     base = px(by + bh + 17)
     put_text(img, px(bx), base, "SEVERITY", lf, (139, 111, 192, 255), sp=3)
@@ -342,18 +335,15 @@ def draw_ornament(img, color):
         d.polygon([(x, my - r), (x + r, my), (x, my + r), (x - r, my)], fill=fill)
 
     for d in (ImageDraw.Draw(glow), ImageDraw.Draw(lay)):
-        # fading lines on both sides
         start, end = px(52), px(106)
         for off in range(start, end):
             a = int(255 * (1 - (off - start) / (end - start)))
             for sx in (-1, 1):
                 x = mid + sx * off
                 d.rectangle((x, my - px(0.75), x, my + px(0.75)), fill=col + (a,))
-        # small side diamonds
         for sx in (-1, 1):
             diamond(d, mid + sx * px(24), px(4), col + (255,))
             diamond(d, mid + sx * px(38), px(2.5), col + (170,))
-        # big center diamond
         diamond(d, mid, px(9), col + (255,))
 
     diamond(ImageDraw.Draw(lay), mid, px(3.5), (255, 255, 255, 255))
@@ -394,7 +384,9 @@ def draw_stamp(img, text, color):
 
 
 def render_card(username, punisher, reason, ptype, case_no, date_text, avatar_bytes=None) -> bytes:
-    ptype = ptype.upper()
+    ptype = (ptype or "").upper()
+    if ptype not in TYPE_STYLE:
+        ptype = "WARNING"
     color, sev = TYPE_STYLE[ptype]
     w, h = W * S, H * S
 
