@@ -19,7 +19,7 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageOps, ImageSequen
 
 from punishment_card import (
     FONT_DIR, H, RES, S, TYPE_STYLE, W, WEIGHT_NAMES,
-    draw_avatar, draw_bar, draw_field, draw_stamp,
+    draw_avatar, draw_bar, draw_field, draw_ornament, draw_stamp,
     font, lin_grad, put, put_text, px, text_w,
 )
 
@@ -157,11 +157,9 @@ def _build_overlay(username, punisher, reason, ptype, case_no, date_text, avatar
     put_text(img, px(300), px(172), "PUNISHMENT", font("Orbitron", 900, 30), (255, 92, 240, 255), sp=14,
              glow=((255, 92, 240), 14))
 
-    # avatar, case number, severity bar
+    # avatar, ornament, severity bar
     draw_avatar(img, avatar_bytes)
-    cf = font("Orbitron", 700, 16)
-    case_text = f"CASE #{case_no:04d}"
-    put_text(img, px(44 + 110) - text_w(case_text, cf, 3) / 2, px(388), case_text, cf, (199, 163, 255, 255), sp=3)
+    draw_ornament(img, color)
     draw_bar(img, sev)
 
     # fields
