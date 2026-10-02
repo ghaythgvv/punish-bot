@@ -248,7 +248,7 @@ class PunishmentDetailsButton(
 
         color_rgb = TYPE_STYLE[record["type"]][0]
         embed = discord.Embed(
-            title=bold(f"Case #{self.case_no:04d} — {record['type'].title()}"),
+            title=bold(f"Case ELT-{self.case_no:04d} — {record['type'].title()}"),
             color=discord.Color.from_rgb(*color_rgb),
         )
         embed.add_field(name=bold("User"), value=f"<@{record['user_id']}> ({bold(record['user_tag'])})", inline=False)
@@ -315,7 +315,7 @@ async def issue_punishment(interaction: discord.Interaction, member: discord.Mem
 
     try:
         await send_with_retry(log_channel, file=file, view=view)
-        print(f"✅ Case #{case_no:04d} ({ptype}) posted for {member} by {interaction.user}")
+        print(f"✅ Case ELT-{case_no:04d} ({ptype}) posted for {member} by {interaction.user}")
     except Exception as e:
         print(f"❌ Failed to send punishment card: {e}")
         await interaction.followup.send(
