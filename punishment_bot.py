@@ -1,513 +1,396 @@
-"""
-ELT Punishment Bot
-=======================================
-Slash commands (/warn, /mute, /timeout, /kick, /ban) so staff get Discord's own
-UI — a member picker, typed fields, and built-in validation — instead of typing
-raw text commands. Wraps punishment_gif.py's render_card_gif() to post an
-ANIMATED punishment card with the target's own avatar and display name, plus a
-"View Punishment Details" button underneath. If the animated card can't be made
-for any reason, it falls back to the still PNG card from punishment_card.py.
-
-Who can use the commands:
-    /warn /timeout /kick /ban -> members with the Moderator role (MOD_ROLE_ID) or
-                                 any role ABOVE it, plus server Administrators.
-    /mute                     -> server Administrators, anyone with the lowest staff
-                                 role in STAFF_ROLE_IDS, or anyone above it.
-
-Requirements:
-    pip install discord.py Pillow     (discord.py 2.4 or newer)
-
-Before running:
-    - Put punishment_card.py, punishment_gif.py and card_bg.gif in the same
-      folder as this file, with the fonts/ folder next to them.
-    - Enable SERVER MEMBERS INTENT for your bot in the Discord Developer Portal.
-    - Invite the bot with BOTH the "bot" and "applications.commands" scopes.
-    - Put your token in the DISCORD_TOKEN environment variable (Railway Variables).
-    - Optional: add your staff role IDs in a Railway variable called
-      STAFF_ROLE_IDS (comma separated, e.g. 111,222,333).
-    - IMPORTANT: the bot's own role must sit ABOVE the highest role of anyone you
-      want to mute/timeout/kick/ban, or Discord rejects it with a 403.
-    - IMPORTANT (case numbers): in Railway add a Volume to this service and mount
-      it at /data. Case numbers and details are saved there, so they survive
-      restarts and redeploys. Without a volume the file is wiped on every deploy.
-    - This bot needs its OWN Discord application + token. If another bot shares
-      the token, the two overwrite each other's slash commands.
-
-If the slash commands ever disappear, an admin can mention the bot and type
-"sync" (for example: @ELT Punishment sync) to bring them back instantly.
-"""
-
 import io
+import math
 import os
-import re
-import json
-import asyncio
-from datetime import timedelta
+from functools import lru_cache
 
-import discord
-from discord import app_commands
-from discord.ext import commands, tasks
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageOps
 
-from punishment_card import render_card, TYPE_STYLE
-from punishment_gif import render_card_gif, clean_for_card, MAX_BYTES
+S = 2
+W, H = 1080, 600
+FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
 
-# =========================== CONFIG ===========================
-TOKEN = os.environ.get("DISCORD_TOKEN")
-
-GUILD_ID = 1410440666747633707  # ELT server ID — commands sync straight to this guild so they show up instantly
-GUILD = discord.Object(id=GUILD_ID)
-
-PUNISHMENT_LOG_CHANNEL_ID = None  # channel where punishment cards get posted (None = the channel the command was run in)
-
-# Moderator role. /warn, /timeout, /kick and /ban can be used by members with this
-# role OR any role positioned above it in the server's role list.
-MOD_ROLE_ID = 1513904125086011402
-
-# Staff role IDs allowed to use /mute (comma separated in the
-# STAFF_ROLE_IDS Railway variable). Add your "mod" and "good" role IDs there.
-STAFF_ROLE_IDS = {
-    int(x)
-    for x in os.environ.get("STAFF_ROLE_IDS", "1513904136783925380").replace(" ", "").split(",")
-    if x.isdigit()
+TYPE_STYLE = {
+    "WARNING": ((255, 176, 32), 33),
+    "MUTE": ((255, 138, 61), 55),
+    "TIMEOUT": ((255, 92, 240), 45),
+    "KICK": ((255, 77, 109), 78),
+    "BAN": ((255, 23, 68), 100),
 }
 
-# Where case numbers + details are saved. On Railway, mount a Volume at /data.
-DATA_DIR = (
-    os.environ.get("DATA_DIR")
-    or os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")
-    or os.path.dirname(os.path.abspath(__file__))
-)
-DB_PATH = os.path.join(DATA_DIR, "punishments.json")
-# ================================================================
+WEIGHT_NAMES = {
+    "Orbitron": {500: "Medium", 700: "Bold", 800: "ExtraBold", 900: "Black"},
+    "Rajdhani": {500: "Medium", 700: "Bold"},
+}
+FALLBACK_FONTS = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "DejaVuSans-Bold.ttf",
+    "arialbd.ttf",
+    "Arial Bold.ttf",
+]
 
-intents = discord.Intents.default()
-intents.members = True  # needed to look up/timeout/kick/ban members and read their avatar
-
-bot = commands.Bot(command_prefix=commands.when_mentioned, intents=intents)
-
-_BOLD_UPPER_START = 0x1D5D4  # Mathematical Sans-Serif Bold Capital A
-_BOLD_LOWER_START = 0x1D5EE  # Mathematical Sans-Serif Bold Small a
-_BOLD_DIGIT_START = 0x1D7EC  # Mathematical Sans-Serif Bold Digit Zero
+RES = Image.Resampling
 
 
-def bold(text: str) -> str:
-    """Converts A-Z, a-z, 0-9 to Mathematical Sans-Serif Bold. Never run this over
-    text containing a Discord ID (<@id>, <#id>, <:name:id>, <t:unix:R>)."""
-    if not text:
+def px(v: float) -> int:
+    return int(round(v * S))
+
+
+@lru_cache(maxsize=None)
+def font(family: str, weight: int, size: float) -> ImageFont.FreeTypeFont:
+    size_px = px(size)
+    name = WEIGHT_NAMES[family][weight]
+    static = os.path.join(FONT_DIR, f"{family}-{name}.ttf")
+    if os.path.exists(static):
+        return ImageFont.truetype(static, size_px)
+    variable = os.path.join(FONT_DIR, f"{family}[wght].ttf")
+    if os.path.exists(variable):
+        f = ImageFont.truetype(variable, size_px)
+        try:
+            f.set_variation_by_axes([weight])
+        except Exception:
+            pass
+        return f
+    for path in FALLBACK_FONTS:
+        try:
+            return ImageFont.truetype(path, size_px)
+        except OSError:
+            continue
+    return ImageFont.load_default(size_px)
+
+
+def text_w(text: str, f: ImageFont.FreeTypeFont, sp: float = 0) -> float:
+    if not sp:
+        return f.getlength(text)
+    return sum(f.getlength(c) for c in text) + sp * S * len(text)
+
+
+def fit(text: str, f, sp: float, max_w: float) -> str:
+    text = " ".join((text or "").split()) or "-"
+    if text_w(text, f, sp) <= max_w:
         return text
-    out = []
+    while text and text_w(text + "...", f, sp) > max_w:
+        text = text[:-1]
+    return text.rstrip() + "..."
+
+
+def _spaced(draw: ImageDraw.ImageDraw, x, y, text, f, fill, sp):
+    if not sp:
+        draw.text((x, y), text, font=f, fill=fill, anchor="ls")
+        return
     for ch in text:
-        code = ord(ch)
-        if 65 <= code <= 90:
-            out.append(chr(_BOLD_UPPER_START + (code - 65)))
-        elif 97 <= code <= 122:
-            out.append(chr(_BOLD_LOWER_START + (code - 97)))
-        elif 48 <= code <= 57:
-            out.append(chr(_BOLD_DIGIT_START + (code - 48)))
-        else:
-            out.append(ch)
-    return "".join(out)
+        draw.text((x, y), ch, font=f, fill=fill, anchor="ls")
+        x += f.getlength(ch) + sp * S
 
 
-# ---------------- Case numbers + records (saved to disk) ----------------
-def load_db():
-    try:
-        with open(DB_PATH, encoding="utf-8") as f:
-            data = json.load(f)
-        return int(data.get("counter", 0)), {int(k): v for k, v in data.get("records", {}).items()}
-    except FileNotFoundError:
-        return 0, {}
-    except Exception as e:
-        print(f"⚠️ Couldn't read {DB_PATH}: {e}")
-        return 0, {}
-
-
-def save_db():
-    try:
-        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-        tmp = DB_PATH + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"counter": case_counter, "records": punishment_records}, f, ensure_ascii=False)
-        os.replace(tmp, DB_PATH)  # atomic, so a crash can't leave a half-written file
-    except Exception as e:
-        print(f"❌ Couldn't save {DB_PATH}: {e}")
-
-
-case_counter, punishment_records = load_db()
-print(f"📁 Case data: {DB_PATH} (last case #{case_counter:04d}, {len(punishment_records)} saved)")
-
-
-def card_name(member: discord.abc.User) -> str:
-    """Name shown on the card: the server display name, or the plain username if
-    the display name has nothing the card font can draw."""
-    return clean_for_card(member.display_name) or member.name
-
-
-def audit_reason(reason: str, action: str, by: discord.abc.User) -> str:
-    """Reason text for Discord's audit log (max 512 characters)."""
-    return f"{reason} — {action} by {by}"[:512]
-
-
-def staff_only(permission: str):
-    """Lets through Administrators, and members whose highest role is the lowest
-    staff role in STAFF_ROLE_IDS (e.g. mod) or any role above it."""
-
-    async def predicate(interaction: discord.Interaction) -> bool:
-        user = interaction.user
-        if user.guild_permissions.administrator:
-            return True
-        staff_roles = [r for r in (interaction.guild.get_role(i) for i in STAFF_ROLE_IDS) if r]
-        if staff_roles and user.top_role >= min(staff_roles):
-            return True
-        raise app_commands.MissingPermissions([permission])
-
-    return app_commands.check(predicate)
-
-
-def mod_only(permission: str):
-    """Lets through members with the Moderator role (MOD_ROLE_ID) or any role
-    ABOVE it, plus server Administrators."""
-
-    async def predicate(interaction: discord.Interaction) -> bool:
-        user = interaction.user
-        if user.guild_permissions.administrator:
-            return True
-        mod_role = interaction.guild.get_role(MOD_ROLE_ID)
-        if mod_role and user.top_role >= mod_role:
-            return True
-        raise app_commands.MissingPermissions([permission])
-
-    return app_commands.check(predicate)
-
-
-def target_problem(interaction: discord.Interaction, member: discord.Member, needs_bot_rank: bool = True):
-    """Returns a message if this punishment shouldn't go ahead, else None."""
-    guild = interaction.guild
-    if member.id == interaction.user.id:
-        return "You can't punish yourself."
-    if member.id == bot.user.id:
-        return "I can't punish myself."
-    if member.id == guild.owner_id:
-        return "You can't punish the server owner."
-    if interaction.user.id != guild.owner_id and member.top_role >= interaction.user.top_role:
-        return "That member's highest role is equal to or above yours."
-    if needs_bot_rank and member.top_role >= guild.me.top_role:
-        return "That member's highest role is equal to or above mine — move my role higher."
-    return None
-
-
-async def send_with_retry(channel, **kwargs):
-    """Send a message with exponential backoff retry logic for rate limits."""
-    max_attempts = 5
-    backoff_delays = [1, 2, 4, 8, 16]
-
-    for attempt in range(max_attempts):
-        try:
-            return await channel.send(**kwargs)
-        except discord.errors.HTTPException as e:
-            if e.status == 429:
-                if attempt < max_attempts - 1:
-                    delay = backoff_delays[attempt]
-                    print(f"⏳ Rate limited, retrying in {delay}s (attempt {attempt + 1}/{max_attempts})")
-                    await asyncio.sleep(delay)
-                else:
-                    print(f"❌ Failed to send message after {max_attempts} attempts")
-                    raise
-            else:
-                raise
-
-
-class PunishmentDetailsButton(
-    discord.ui.DynamicItem[discord.ui.Button],
-    template=r"punishment_details_(?P<case>[0-9]+)",
-):
-    """'View Punishment Details' button. Being a DynamicItem, it keeps working
-    after a bot restart instead of showing 'This interaction failed'."""
-
-    def __init__(self, case_no: int):
-        super().__init__(
-            discord.ui.Button(
-                label=f"🔍 {bold('View Punishment Details')}",
-                style=discord.ButtonStyle.secondary,
-                custom_id=f"punishment_details_{case_no}",
-            )
-        )
-        self.case_no = case_no
-
-    @classmethod
-    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match: re.Match):
-        return cls(int(match["case"]))
-
-    async def callback(self, interaction: discord.Interaction):
-        record = punishment_records.get(self.case_no)
-        if record is None:
-            return await interaction.response.send_message(
-                bold("Details for this case aren't available anymore."),
-                ephemeral=True,
-            )
-
-        color_rgb = TYPE_STYLE[record["type"]][0]
-        embed = discord.Embed(
-            title=bold(f"Case ELT-{self.case_no:04d} — {record['type'].title()}"),
-            color=discord.Color.from_rgb(*color_rgb),
-        )
-        embed.add_field(name=bold("User"), value=f"<@{record['user_id']}> ({bold(record['user_tag'])})", inline=False)
-        embed.add_field(name=bold("Punisher"), value=f"<@{record['punisher_id']}> ({bold(record['punisher_tag'])})", inline=False)
-        embed.add_field(name=bold("Reason"), value=bold(record["reason"]), inline=False)
-        embed.add_field(name=bold("Date"), value=bold(record["date_text"]), inline=True)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-
-async def issue_punishment(interaction: discord.Interaction, member: discord.Member, ptype: str, reason: str):
-    """Renders the card with the member's own avatar and posts it with the details
-    button. Assumes the interaction has already been deferred (ephemeral)."""
-    global case_counter
-    case_counter += 1
-    case_no = case_counter
-    save_db()  # reserve the number right away so it's never reused
-
-    try:
-        avatar_bytes = await member.display_avatar.replace(size=256, format="png").read()
-    except Exception as e:
-        print(f"⚠️ Couldn't fetch avatar for {member}: {e}")
-        avatar_bytes = None
-
-    date_text = discord.utils.utcnow().strftime("%d/%m/%Y")
-    user_name, punisher_name = card_name(member), card_name(interaction.user)
-    max_bytes = min(MAX_BYTES, int(interaction.guild.filesize_limit * 0.9))
-
-    # CPU-bound Pillow work runs in a thread so it doesn't block the event loop.
-    try:
-        card_bytes = await asyncio.to_thread(
-            render_card_gif, user_name, punisher_name, reason, ptype, case_no, date_text, avatar_bytes, max_bytes
-        )
-        ext = "gif"
-    except Exception as e:
-        print(f"⚠️ Animated card failed ({type(e).__name__}: {e}) — falling back to the still card")
-        try:
-            card_bytes = await asyncio.to_thread(
-                render_card, user_name, punisher_name, reason, ptype, case_no, date_text, avatar_bytes
-            )
-            ext = "png"
-        except Exception as e2:
-            print(f"❌ Failed to render punishment card: {e2}")
-            await interaction.followup.send(f"⚠️ {bold('Something went wrong generating the punishment card.')}", ephemeral=True)
-            return
-
-    punishment_records[case_no] = {
-        "user_id": member.id,
-        "user_tag": str(member),
-        "punisher_id": interaction.user.id,
-        "punisher_tag": str(interaction.user),
-        "reason": reason,
-        "type": ptype,
-        "date_text": date_text,
-    }
-    save_db()
-
-    log_channel = interaction.guild.get_channel(PUNISHMENT_LOG_CHANNEL_ID) if PUNISHMENT_LOG_CHANNEL_ID else interaction.channel
-    if log_channel is None:
-        log_channel = interaction.channel
-
-    file = discord.File(io.BytesIO(card_bytes), filename=f"punishment_case_{case_no:04d}.{ext}")
-    view = discord.ui.View(timeout=None)
-    view.add_item(PunishmentDetailsButton(case_no))
-
-    try:
-        await send_with_retry(log_channel, file=file, view=view)
-        print(f"✅ Case ELT-{case_no:04d} ({ptype}) posted for {member} by {interaction.user}")
-    except Exception as e:
-        print(f"❌ Failed to send punishment card: {e}")
-        await interaction.followup.send(
-            f"⚠️ {bold('Generated the card but could not post it — check my permissions in that channel.')}",
-            ephemeral=True,
-        )
+def put(img: Image.Image, layer: Image.Image, x0: int, y0: int):
+    sx, sy = max(-x0, 0), max(-y0, 0)
+    if sx >= layer.width or sy >= layer.height:
         return
+    img.alpha_composite(layer, (max(x0, 0), max(y0, 0)), (sx, sy))
 
-    await interaction.followup.send(
-        f"✅ {bold(f'{ptype.title()} logged for')} {member.mention} {bold('in')} {log_channel.mention}.",
-        ephemeral=True,
+
+def put_text(img, x, y, text, f, fill, sp=0, glow=None):
+    tw = int(text_w(text, f, sp)) + 2
+    size = f.size
+    blur = glow[1] * S / 2 if glow else 0
+    pad = int(blur * 3) + 4
+    asc = int(size * 1.2)
+    lw, lh = tw + 2 * pad, int(size * 1.7) + 2 * pad
+    ox, oy = int(x) - pad, int(y) - asc - pad
+    if glow:
+        gl = Image.new("RGBA", (lw, lh), tuple(glow[0]) + (0,))
+        _spaced(ImageDraw.Draw(gl), pad, asc + pad, text, f, tuple(glow[0]) + (255,), sp)
+        put(img, gl.filter(ImageFilter.GaussianBlur(blur)), ox, oy)
+    cl = Image.new("RGBA", (lw, lh), tuple(fill[:3]) + (0,))
+    _spaced(ImageDraw.Draw(cl), pad, asc + pad, text, f, fill, sp)
+    put(img, cl, ox, oy)
+
+
+def _interp(stops, t):
+    t = min(1.0, max(0.0, t))
+    for (p0, c0), (p1, c1) in zip(stops, stops[1:]):
+        if t <= p1:
+            k = 0 if p1 == p0 else min(1.0, max(0.0, (t - p0) / (p1 - p0)))
+            a = c0[3] * (1 - k) + c1[3] * k
+            if a <= 0:
+                return (c1[0], c1[1], c1[2], 0)
+            rgb = [(c0[i] * c0[3] * (1 - k) + c1[i] * c1[3] * k) / a for i in range(3)]
+            return (int(rgb[0]), int(rgb[1]), int(rgb[2]), int(a))
+    return stops[-1][1]
+
+
+def lin_grad(w, h, stops, angle):
+    sw, sh = max(2, w // 16), max(2, h // 16)
+    a = math.radians(angle)
+    dx, dy = math.sin(a), -math.cos(a)
+    length = abs(w * dx) + abs(h * dy) or 1
+    data = []
+    for j in range(sh):
+        y = (j + 0.5) / sh * h - h / 2
+        for i in range(sw):
+            x = (i + 0.5) / sw * w - w / 2
+            data.append(_interp(stops, (x * dx + y * dy) / length + 0.5))
+    im = Image.new("RGBA", (sw, sh))
+    im.putdata(data)
+    return im.resize((w, h), RES.BICUBIC)
+
+
+def radial(w, h, cx, cy, rx, ry, color):
+    r, g, b, a = color
+    sw, sh = max(2, w // 12), max(2, h // 12)
+    data = []
+    for j in range(sh):
+        y = (j + 0.5) / sh * h
+        for i in range(sw):
+            x = (i + 0.5) / sw * w
+            d = math.hypot((x - cx) / rx, (y - cy) / ry)
+            data.append((r, g, b, int(a * max(0.0, 1 - d))))
+    im = Image.new("RGBA", (sw, sh))
+    im.putdata(data)
+    return im.resize((w, h), RES.BICUBIC)
+
+
+def hex_mask(w, h):
+    m = Image.new("L", (w, h), 0)
+    pts = [(0.5, 0), (1, 0.2), (1, 0.8), (0.5, 1), (0, 0.8), (0, 0.2)]
+    ImageDraw.Draw(m).polygon([(fx * (w - 1), fy * (h - 1)) for fx, fy in pts], fill=255)
+    return m
+
+
+def draw_field(img, y, label, value):
+    x0, fw, fh = 300, 560, 54
+    bg = lin_grad(px(fw), px(fh), [(0, (42, 17, 74, 255)), (1, (255, 255, 255, 5))], 90)
+    m = Image.new("L", bg.size, 0)
+    ImageDraw.Draw(m).rounded_rectangle(
+        (0, 0, bg.width - 1, bg.height - 1), px(14), fill=255, corners=(False, True, True, False)
     )
+    bg.putalpha(ImageChops.multiply(bg.getchannel("A"), m))
+    put(img, bg, px(x0), px(y))
+    put(img, Image.new("RGBA", (px(5), px(fh)), (181, 107, 255, 255)), px(x0), px(y))
+
+    base = px(y + 37)
+    lf = font("Orbitron", 800, 14)
+    label_w = max(105, text_w(label, lf, 3) / S)
+    put_text(img, px(x0 + 25), base, label, lf, (255, 140, 246, 255), sp=3)
+    vf = font("Rajdhani", 700, 28)
+    max_w = px(fw - 5 - 20 - 20 - 12) - px(label_w)
+    put_text(img, px(x0 + 25 + label_w + 12), base, fit(value, vf, 0, max_w), vf, (243, 234, 255, 255))
 
 
-async def reject(interaction: discord.Interaction, command: str, target: discord.Member, msg: str):
-    """Sends the ephemeral rejection AND logs it so it shows up in Railway's logs."""
-    print(f"🚫 /{command}: {interaction.user} -> {target} blocked: {msg}")
-    await interaction.followup.send(f"⚠️ {bold(msg)}", ephemeral=True)
+def draw_avatar(img, avatar_bytes):
+    ax, ay, aw, ah = 44, 100, 220, 250
+    border = lin_grad(px(aw), px(ah), [(0, (181, 107, 255, 255)), (1, (255, 92, 240, 255))], 160)
+    border.putalpha(hex_mask(*border.size))
+    put(img, border, px(ax), px(ay))
 
-
-# ---------------- Slash command syncing (retries + auto re-sync) ----------------
-async def sync_commands() -> bool:
-    """Pushes the slash commands to the guild, retrying on temporary errors."""
-    for attempt in range(1, 6):
+    iw, ih = px(aw - 8), px(ah - 8)
+    inner = Image.new("RGBA", (iw, ih), (18, 9, 31, 255))
+    ok = False
+    if avatar_bytes:
         try:
-            synced = await bot.tree.sync(guild=GUILD)
-            print(f"🔄 Synced {len(synced)} slash command(s) to guild {GUILD_ID}")
-            return True
-        except Exception as e:
-            print(f"❌ Sync failed (attempt {attempt}/5): {e}")
-            await asyncio.sleep(5 * attempt)
-    return False
+            av = Image.open(io.BytesIO(avatar_bytes)).convert("RGBA")
+            inner.alpha_composite(ImageOps.fit(av, (iw, ih), RES.LANCZOS))
+            ok = True
+        except Exception:
+            ok = False
+    if not ok:
+        qf = font("Orbitron", 900, 60)
+        put_text(inner, (iw - text_w("?", qf)) / 2, ih / 2 + px(22), "?", qf, (91, 58, 148, 255))
+    inner.putalpha(hex_mask(iw, ih))
+    put(img, inner, px(ax + 4), px(ay + 4))
 
 
-@tasks.loop(hours=6)
-async def resync_loop():
-    """Runs once at startup (after the bot is ready), then every 6 hours, so the
-    commands can't silently disappear."""
-    await sync_commands()
+def draw_bar(img, sev, color=(255, 92, 240)):
+    """Severity bar: glossy rounded fill in the punishment's color, soft glow,
+    segment ticks, a bright end cap and a small label underneath."""
+    bx, by, bw, bh = 44, 402, 220, 12
+    color = tuple(color)
+    W_, H_ = px(bw), px(bh)
+    r = H_ // 2
+
+    fill_w = max(H_, px(bw * sev / 100))
+    rmask = Image.new("L", (W_, H_), 0)
+    ImageDraw.Draw(rmask).rounded_rectangle((0, 0, W_ - 1, H_ - 1), r, fill=255)
+    fmask = Image.new("L", (fill_w, H_), 0)
+    ImageDraw.Draw(fmask).rounded_rectangle((0, 0, fill_w - 1, H_ - 1), r, fill=255)
+
+    # glow behind the filled part
+    pad = px(10)
+    gl = Image.new("L", (W_ + 2 * pad, H_ + 2 * pad), 0)
+    gl.paste(fmask, (pad, pad))
+    gl = gl.filter(ImageFilter.GaussianBlur(px(5))).point(lambda v: int(v * 0.75))
+    glow = Image.new("RGBA", gl.size, color + (0,))
+    glow.putalpha(gl)
+    put(img, glow, px(bx) - pad, px(by) - pad)
+
+    # track
+    bar = Image.new("RGBA", (W_, H_), (30, 16, 52, 255))
+    ImageDraw.Draw(bar).rectangle((0, 0, W_, H_ // 3), fill=(20, 9, 36, 255))
+
+    # fill: dark -> bright gradient, glossy top half
+    dark = tuple(int(c * 0.45) for c in color)
+    fill = lin_grad(fill_w, H_, [(0, dark + (255,)), (1, color + (255,))], 90)
+    fill.alpha_composite(Image.new("RGBA", (fill_w, H_ * 2 // 5), (255, 255, 255, 70)), (0, px(1)))
+    fill.putalpha(ImageChops.multiply(fill.getchannel("A"), fmask))
+    bar.alpha_composite(fill)
+
+    # segment ticks at 25 / 50 / 75 %
+    td = ImageDraw.Draw(bar)
+    for pct in (25, 50, 75):
+        x = px(bw * pct / 100)
+        td.rectangle((x - px(0.6), 0, x + px(0.6), H_), fill=(10, 3, 22, 170))
+
+    # bright end cap
+    ex = fill_w - r
+    cap = Image.new("RGBA", (W_, H_), (0, 0, 0, 0))
+    ImageDraw.Draw(cap).ellipse((ex - px(2.2), r - px(2.2), ex + px(2.2), r + px(2.2)), fill=(255, 255, 255, 235))
+    bar.alpha_composite(cap.filter(ImageFilter.GaussianBlur(px(0.6))))
+
+    bar.putalpha(ImageChops.multiply(bar.getchannel("A"), rmask))
+    put(img, bar, px(bx), px(by))
+
+    # thin outline
+    ol = Image.new("RGBA", (W_, H_), (0, 0, 0, 0))
+    ImageDraw.Draw(ol).rounded_rectangle((0, 0, W_ - 1, H_ - 1), r, outline=(139, 61, 255, 110), width=px(1))
+    put(img, ol, px(bx), px(by))
+
+    # label
+    lf = font("Orbitron", 700, 11)
+    base = px(by + bh + 17)
+    put_text(img, px(bx), base, "SEVERITY", lf, (139, 111, 192, 255), sp=3)
+    pct = f"{sev}%"
+    put_text(img, px(bx + bw) - text_w(pct, lf, 2), base, pct, lf, color + (255,), sp=2)
 
 
-@resync_loop.before_loop
-async def _wait_ready():
-    await bot.wait_until_ready()
+def draw_ornament(img, color):
+    """Glowing diamond divider under the avatar, in the punishment's color."""
+    cx, cy = 44 + 110, 377
+    lw, lh = px(220), px(40)
+    mid, my = lw // 2, lh // 2
+    col = tuple(color)
+
+    glow = Image.new("RGBA", (lw, lh), col + (0,))
+    lay = Image.new("RGBA", (lw, lh), col + (0,))
+
+    def diamond(d, x, r, fill):
+        d.polygon([(x, my - r), (x + r, my), (x, my + r), (x - r, my)], fill=fill)
+
+    for d in (ImageDraw.Draw(glow), ImageDraw.Draw(lay)):
+        # fading lines on both sides
+        start, end = px(52), px(106)
+        for off in range(start, end):
+            a = int(255 * (1 - (off - start) / (end - start)))
+            for sx in (-1, 1):
+                x = mid + sx * off
+                d.rectangle((x, my - px(0.75), x, my + px(0.75)), fill=col + (a,))
+        # small side diamonds
+        for sx in (-1, 1):
+            diamond(d, mid + sx * px(24), px(4), col + (255,))
+            diamond(d, mid + sx * px(38), px(2.5), col + (170,))
+        # big center diamond
+        diamond(d, mid, px(9), col + (255,))
+
+    diamond(ImageDraw.Draw(lay), mid, px(3.5), (255, 255, 255, 255))
+    put(img, glow.filter(ImageFilter.GaussianBlur(px(5))), px(cx) - lw // 2, px(cy) - lh // 2)
+    put(img, lay, px(cx) - lw // 2, px(cy) - lh // 2)
 
 
-@bot.event
-async def setup_hook():
-    bot.add_dynamic_items(PunishmentDetailsButton)
-    resync_loop.start()
+def draw_stamp(img, text, color):
+    f = font("Orbitron", 900, 44)
+    tw = text_w(text, f, 6) / S
+    bw, bh, mg = tw + 44 + 12, 44 * 1.25 + 16 + 12, 40
+    lw, lh = px(bw + 2 * mg), px(bh + 2 * mg)
+    box = (px(mg), px(mg), px(mg + bw) - 1, px(mg + bh) - 1)
+
+    sh = Image.new("RGBA", (lw, lh), tuple(color) + (0,))
+    a = Image.new("L", (lw, lh), 0)
+    ImageDraw.Draw(a).rounded_rectangle(box, px(10), fill=102)
+    a = a.filter(ImageFilter.GaussianBlur(px(18) / 2))
+    hole = Image.new("L", (lw, lh), 255)
+    ImageDraw.Draw(hole).rounded_rectangle(box, px(10), fill=0)
+    sh.putalpha(ImageChops.multiply(a, hole))
+
+    layer = Image.new("RGBA", (lw, lh), tuple(color) + (0,))
+    d = ImageDraw.Draw(layer)
+    col = tuple(color) + (255,)
+    d.rounded_rectangle(box, px(10), outline=col, width=px(2))
+    inner = (box[0] + px(4), box[1] + px(4), box[2] - px(4), box[3] - px(4))
+    d.rounded_rectangle(inner, px(6), outline=col, width=px(2))
+    put_text(layer, px(mg + 6 + 22), px(mg + 6 + 8 + 41), text, f, col, sp=6, glow=(color, 14))
+
+    out = Image.new("RGBA", (lw, lh), (0, 0, 0, 0))
+    put(out, sh, 0, 0)
+    put(out, layer, 0, 0)
+    out.putalpha(out.getchannel("A").point(lambda v: int(v * 0.92)))
+    rot = out.rotate(12, resample=RES.BICUBIC, expand=True)
+    cx, cy = W - 50 - bw / 2, 112 + bh / 2
+    put(img, rot, px(cx) - rot.width // 2, px(cy) - rot.height // 2)
 
 
-@bot.command(name="sync")
-@commands.guild_only()
-@commands.has_guild_permissions(administrator=True)
-async def sync_cmd(ctx: commands.Context):
-    """Admin only: mention the bot and type 'sync' to re-register the slash commands."""
-    ok = await sync_commands()
-    await ctx.reply("✅ Slash commands re-synced." if ok else "❌ Sync failed, check the logs.")
+def render_card(username, punisher, reason, ptype, case_no, date_text, avatar_bytes=None) -> bytes:
+    ptype = ptype.upper()
+    color, sev = TYPE_STYLE[ptype]
+    w, h = W * S, H * S
 
+    card_mask = Image.new("L", (w, h), 0)
+    ImageDraw.Draw(card_mask).rounded_rectangle((0, 0, w - 1, h - 1), px(22), fill=255)
 
-@bot.event
-async def on_ready():
-    print(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
-    print(f"👮 Staff role IDs: {sorted(STAFF_ROLE_IDS) or 'none set'}")
-    print(f"🛡️ Moderator role ID: {MOD_ROLE_ID}")
+    img = lin_grad(w, h, [(0, (13, 4, 32, 255)), (0.6, (26, 7, 54, 255)), (1, (10, 3, 22, 255))], 135)
+    put(img, radial(w, h, 0.05 * w, h, px(500), px(400), (192, 27, 255, 0x44)), 0, 0)
+    put(img, radial(w, h, 0.85 * w, 0.1 * h, px(600), px(400), (91, 27, 189, 0x55)), 0, 0)
 
+    pad = px(80)
+    big = Image.new("L", (w + 2 * pad, h + 2 * pad), 0)
+    big.paste(card_mask, (pad, pad))
+    big = big.filter(ImageFilter.GaussianBlur(px(40) / 2)).crop((pad, pad, pad + w, pad + h))
+    glow_a = ImageChops.invert(big).point(lambda v: int(v * 0x88 / 255))
+    glow = Image.new("RGBA", (w, h), (122, 44, 255, 0))
+    glow.putalpha(glow_a)
+    put(img, glow, 0, 0)
 
-@bot.event
-async def on_command_error(ctx: commands.Context, error: commands.CommandError):
-    if isinstance(error, (commands.CommandNotFound, commands.CheckFailure)):
-        return
-    print(f"❌ Prefix command error: {error}")
+    lines = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    ld = ImageDraw.Draw(lines)
+    for y in range(0, h, px(5)):
+        ld.rectangle((0, y, w, y + px(2) - 1), fill=(255, 255, 255, 6))
+    put(img, lines, 0, 0)
 
+    wf = font("Orbitron", 900, 300)
+    put_text(img, px(W + 20) - text_w("ELT", wf, -10), px(H - 12), "ELT", wf, (139, 61, 255, 18), sp=-10)
 
-@bot.tree.command(name="warn", description="Log a warning card for a member. No Discord action is taken.", guild=GUILD)
-@app_commands.describe(member="The member being warned", reason="Why they're being warned")
-@app_commands.guild_only()
-@mod_only("manage_messages")
-async def warn_cmd(interaction: discord.Interaction, member: discord.Member, reason: app_commands.Range[str, 1, 300]):
-    await interaction.response.defer(ephemeral=True)
-    problem = target_problem(interaction, member, needs_bot_rank=False)
-    if problem:
-        return await reject(interaction, "warn", member, problem)
-    await issue_punishment(interaction, member, "WARNING", reason)
+    tf = font("Orbitron", 700, 20)
+    put_text(img, px(40), px(49), "ELT COMMUNITY", tf, (255, 255, 255, 255), sp=6, glow=((181, 107, 255), 14))
+    tag = "// PUNISHMENT LOG"
+    put_text(img, px(W - 40) - text_w(tag, tf, 6), px(49), tag, tf, (199, 163, 255, 255), sp=6)
 
+    put_text(img, px(300), px(132), "NEW", font("Orbitron", 900, 62), (255, 255, 255, 255), sp=4,
+             glow=((181, 107, 255), 32))
+    put_text(img, px(300), px(172), "PUNISHMENT", font("Orbitron", 900, 30), (255, 92, 240, 255), sp=14,
+             glow=((255, 92, 240), 14))
 
-@bot.tree.command(name="mute", description="Time a member out and log a mute card.", guild=GUILD)
-@app_commands.describe(member="The member being muted", minutes="How long to mute them for, in minutes", reason="Why they're being muted")
-@app_commands.guild_only()
-@staff_only("moderate_members")
-async def mute_cmd(interaction: discord.Interaction, member: discord.Member, minutes: app_commands.Range[int, 1, 40320], reason: app_commands.Range[str, 1, 300]):
-    await interaction.response.defer(ephemeral=True)
-    problem = target_problem(interaction, member)
-    if problem:
-        return await reject(interaction, "mute", member, problem)
-    try:
-        await member.timeout(timedelta(minutes=minutes), reason=audit_reason(reason, "muted", interaction.user))
-    except discord.Forbidden:
-        return await reject(interaction, "mute", member, "I do not have permission to time out that member.")
-    except discord.HTTPException as e:
-        print(f"❌ /mute HTTPException for {member}: {e}")
-        return await interaction.followup.send(f"⚠️ {bold('Failed to mute:')} {e}", ephemeral=True)
-    await issue_punishment(interaction, member, "MUTE", f"{reason} (for {minutes}m)")
+    draw_avatar(img, avatar_bytes)
+    draw_ornament(img, color)
+    draw_bar(img, sev, color)
 
+    draw_field(img, 250, "USER", username)
+    draw_field(img, 324, "PUNISHER", punisher)
+    draw_field(img, 398, "REASON", reason)
 
-@bot.tree.command(name="timeout", description="Time a member out for minutes, hours or days and log a timeout card.", guild=GUILD)
-@app_commands.describe(member="The member being timed out", amount="How long (a number)", unit="Minutes, hours or days", reason="Why they're being timed out")
-@app_commands.choices(unit=[
-    app_commands.Choice(name="Minutes", value="minutes"),
-    app_commands.Choice(name="Hours", value="hours"),
-    app_commands.Choice(name="Days", value="days"),
-])
-@app_commands.guild_only()
-@mod_only("moderate_members")
-async def timeout_cmd(interaction: discord.Interaction, member: discord.Member, amount: app_commands.Range[int, 1, 40320], unit: app_commands.Choice[str], reason: app_commands.Range[str, 1, 300]):
-    await interaction.response.defer(ephemeral=True)
-    duration = timedelta(**{unit.value: amount})
-    if duration > timedelta(days=28):
-        return await reject(interaction, "timeout", member, "Discord only allows timeouts up to 28 days.")
-    problem = target_problem(interaction, member)
-    if problem:
-        return await reject(interaction, "timeout", member, problem)
-    try:
-        await member.timeout(duration, reason=audit_reason(reason, "timed out", interaction.user))
-    except discord.Forbidden:
-        return await reject(interaction, "timeout", member, "I do not have permission to time out that member.")
-    except discord.HTTPException as e:
-        print(f"❌ /timeout HTTPException for {member}: {e}")
-        return await interaction.followup.send(f"⚠️ {bold('Failed to time out:')} {e}", ephemeral=True)
-    unit_label = unit.value if amount != 1 else unit.value[:-1]
-    await issue_punishment(interaction, member, "TIMEOUT", f"{reason} (for {amount} {unit_label})")
+    draw_stamp(img, ptype, color)
 
+    put_text(img, px(300), px(H - 40), date_text, font("Orbitron", 700, 26), (199, 163, 255, 255), sp=3)
+    sf, ef = font("Orbitron", 800, 14), font("Orbitron", 800, 26)
+    put_text(img, px(W - 40) - text_w("ISSUED BY", sf, 5), px(H - 66), "ISSUED BY", sf, (139, 111, 192, 255), sp=5)
+    put_text(img, px(W - 40) - text_w("ELITE", ef, 0), px(H - 38), "ELITE", ef, (255, 255, 255, 255),
+             glow=((181, 107, 255), 12))
 
-@bot.tree.command(name="kick", description="Kick a member and log a kick card.", guild=GUILD)
-@app_commands.describe(member="The member being kicked", reason="Why they're being kicked")
-@app_commands.guild_only()
-@mod_only("kick_members")
-async def kick_cmd(interaction: discord.Interaction, member: discord.Member, reason: app_commands.Range[str, 1, 300]):
-    await interaction.response.defer(ephemeral=True)
-    problem = target_problem(interaction, member)
-    if problem:
-        return await reject(interaction, "kick", member, problem)
-    try:
-        await member.kick(reason=audit_reason(reason, "kicked", interaction.user))
-    except discord.Forbidden:
-        return await reject(interaction, "kick", member, "I do not have permission to kick that member.")
-    except discord.HTTPException as e:
-        print(f"❌ /kick HTTPException for {member}: {e}")
-        return await interaction.followup.send(f"⚠️ {bold('Failed to kick:')} {e}", ephemeral=True)
-    await issue_punishment(interaction, member, "KICK", reason)
+    border = Image.new("RGBA", (w, h), (139, 61, 255, 0))
+    ba = Image.new("L", (w, h), 0)
+    ImageDraw.Draw(ba).rounded_rectangle((0, 0, w - 1, h - 1), px(22), outline=255, width=px(2))
+    border.putalpha(ba)
+    put(img, border, 0, 0)
+    img.putalpha(card_mask)
+    img = img.resize((W, H), RES.LANCZOS)
 
-
-@bot.tree.command(name="ban", description="Ban a member and log a ban card.", guild=GUILD)
-@app_commands.describe(member="The member being banned", reason="Why they're being banned")
-@app_commands.guild_only()
-@mod_only("ban_members")
-async def ban_cmd(interaction: discord.Interaction, member: discord.Member, reason: app_commands.Range[str, 1, 300]):
-    await interaction.response.defer(ephemeral=True)
-    problem = target_problem(interaction, member)
-    if problem:
-        return await reject(interaction, "ban", member, problem)
-    try:
-        await member.ban(reason=audit_reason(reason, "banned", interaction.user))
-    except discord.Forbidden:
-        return await reject(interaction, "ban", member, "I do not have permission to ban that member.")
-    except discord.HTTPException as e:
-        print(f"❌ /ban HTTPException for {member}: {e}")
-        return await interaction.followup.send(f"⚠️ {bold('Failed to ban:')} {e}", ephemeral=True)
-    await issue_punishment(interaction, member, "BAN", reason)
-
-
-@bot.tree.error
-async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    if isinstance(error, app_commands.MissingPermissions):
-        print(f"🚫 {interaction.user} tried /{interaction.command.name if interaction.command else '?'} without permission")
-        msg = f"⚠️ {bold('You do not have permission to do that.')}"
-    else:
-        original = getattr(error, "original", error)
-        print(f"❌ Unhandled app command error in {interaction.command}: {original}")
-        msg = f"⚠️ {bold('Something went wrong running that command.')}"
-
-    try:
-        if interaction.response.is_done():
-            await interaction.followup.send(msg, ephemeral=True)
-        else:
-            await interaction.response.send_message(msg, ephemeral=True)
-    except discord.HTTPException:
-        pass
-
-
-if not TOKEN:
-    raise SystemExit("DISCORD_TOKEN is not set. Add it in Railway's Variables tab, then redeploy.")
-
-bot.run(TOKEN)
+    out = io.BytesIO()
+    img.save(out, format="PNG")
+    return out.getvalue()
