@@ -160,7 +160,7 @@ def _build_overlay(username, punisher, reason, ptype, case_no, date_text, avatar
     # avatar, ornament, severity bar
     draw_avatar(img, avatar_bytes)
     draw_ornament(img, color)
-    draw_bar(img, sev)
+    draw_bar(img, sev, color)
 
     # fields
     draw_field(img, 250, "USER", username)
