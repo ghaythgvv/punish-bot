@@ -211,6 +211,39 @@ def draw_bar(img, sev):
     put(img, bar, px(bx), px(by))
 
 
+def draw_ornament(img, color):
+    """Glowing diamond divider under the avatar, in the punishment's color."""
+    cx, cy = 44 + 110, 377
+    lw, lh = px(220), px(40)
+    mid, my = lw // 2, lh // 2
+    col = tuple(color)
+
+    glow = Image.new("RGBA", (lw, lh), col + (0,))
+    lay = Image.new("RGBA", (lw, lh), col + (0,))
+
+    def diamond(d, x, r, fill):
+        d.polygon([(x, my - r), (x + r, my), (x, my + r), (x - r, my)], fill=fill)
+
+    for d in (ImageDraw.Draw(glow), ImageDraw.Draw(lay)):
+        # fading lines on both sides
+        start, end = px(52), px(106)
+        for off in range(start, end):
+            a = int(255 * (1 - (off - start) / (end - start)))
+            for sx in (-1, 1):
+                x = mid + sx * off
+                d.rectangle((x, my - px(0.75), x, my + px(0.75)), fill=col + (a,))
+        # small side diamonds
+        for sx in (-1, 1):
+            diamond(d, mid + sx * px(24), px(4), col + (255,))
+            diamond(d, mid + sx * px(38), px(2.5), col + (170,))
+        # big center diamond
+        diamond(d, mid, px(9), col + (255,))
+
+    diamond(ImageDraw.Draw(lay), mid, px(3.5), (255, 255, 255, 255))
+    put(img, glow.filter(ImageFilter.GaussianBlur(px(5))), px(cx) - lw // 2, px(cy) - lh // 2)
+    put(img, lay, px(cx) - lw // 2, px(cy) - lh // 2)
+
+
 def draw_stamp(img, text, color):
     f = font("Orbitron", 900, 44)
     tw = text_w(text, f, 6) / S
@@ -284,9 +317,7 @@ def render_card(username, punisher, reason, ptype, case_no, date_text, avatar_by
              glow=((255, 92, 240), 14))
 
     draw_avatar(img, avatar_bytes)
-    cf = font("Orbitron", 700, 16)
-    case_text = f"CASE #{case_no:04d}"
-    put_text(img, px(44 + 110) - text_w(case_text, cf, 3) / 2, px(388), case_text, cf, (199, 163, 255, 255), sp=3)
+    draw_ornament(img, color)
     draw_bar(img, sev)
 
     draw_field(img, 250, "USER", username)
