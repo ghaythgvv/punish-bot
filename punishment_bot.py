@@ -27,17 +27,26 @@ Before running:
       STAFF_ROLE_IDS (comma separated, e.g. 111,222,333).
     - IMPORTANT: the bot's own role must sit ABOVE the highest role of anyone you
       want to mute/timeout/kick/ban, or Discord rejects it with a 403.
+    - IMPORTANT (case numbers): in Railway add a Volume to this service and mount
+      it at /data. Case numbers and details are saved there, so they survive
+      restarts and redeploys. Without a volume the file is wiped on every deploy.
+    - This bot needs its OWN Discord application + token. If another bot shares
+      the token, the two overwrite each other's slash commands.
+
+If the slash commands ever disappear, an admin can mention the bot and type
+"sync" (for example: @ELT Punishment sync) to bring them back instantly.
 """
 
 import io
 import os
 import re
+import json
 import asyncio
 from datetime import timedelta
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 from punishment_card import render_card, TYPE_STYLE
 from punishment_gif import render_card_gif, clean_for_card, MAX_BYTES
@@ -46,6 +55,7 @@ from punishment_gif import render_card_gif, clean_for_card, MAX_BYTES
 TOKEN = os.environ.get("DISCORD_TOKEN")
 
 GUILD_ID = 1410440666747633707  # ELT server ID — commands sync straight to this guild so they show up instantly
+GUILD = discord.Object(id=GUILD_ID)
 
 PUNISHMENT_LOG_CHANNEL_ID = None  # channel where punishment cards get posted (None = the channel the command was run in)
 
@@ -60,6 +70,14 @@ STAFF_ROLE_IDS = {
     for x in os.environ.get("STAFF_ROLE_IDS", "1513904136783925380").replace(" ", "").split(",")
     if x.isdigit()
 }
+
+# Where case numbers + details are saved. On Railway, mount a Volume at /data.
+DATA_DIR = (
+    os.environ.get("DATA_DIR")
+    or os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")
+    or os.path.dirname(os.path.abspath(__file__))
+)
+DB_PATH = os.path.join(DATA_DIR, "punishments.json")
 # ================================================================
 
 intents = discord.Intents.default()
@@ -91,9 +109,32 @@ def bold(text: str) -> str:
     return "".join(out)
 
 
-# Case numbers and full punishment details, in memory only (reset on restart).
-case_counter = 0
-punishment_records = {}
+# ---------------- Case numbers + records (saved to disk) ----------------
+def load_db():
+    try:
+        with open(DB_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        return int(data.get("counter", 0)), {int(k): v for k, v in data.get("records", {}).items()}
+    except FileNotFoundError:
+        return 0, {}
+    except Exception as e:
+        print(f"⚠️ Couldn't read {DB_PATH}: {e}")
+        return 0, {}
+
+
+def save_db():
+    try:
+        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+        tmp = DB_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"counter": case_counter, "records": punishment_records}, f, ensure_ascii=False)
+        os.replace(tmp, DB_PATH)  # atomic, so a crash can't leave a half-written file
+    except Exception as e:
+        print(f"❌ Couldn't save {DB_PATH}: {e}")
+
+
+case_counter, punishment_records = load_db()
+print(f"📁 Case data: {DB_PATH} (last case #{case_counter:04d}, {len(punishment_records)} saved)")
 
 
 def card_name(member: discord.abc.User) -> str:
@@ -201,7 +242,7 @@ class PunishmentDetailsButton(
         record = punishment_records.get(self.case_no)
         if record is None:
             return await interaction.response.send_message(
-                bold("Details for this case aren't available anymore (the bot restarted since it was issued)."),
+                bold("Details for this case aren't available anymore."),
                 ephemeral=True,
             )
 
@@ -223,6 +264,7 @@ async def issue_punishment(interaction: discord.Interaction, member: discord.Mem
     global case_counter
     case_counter += 1
     case_no = case_counter
+    save_db()  # reserve the number right away so it's never reused
 
     try:
         avatar_bytes = await member.display_avatar.replace(size=256, format="png").read()
@@ -261,6 +303,7 @@ async def issue_punishment(interaction: discord.Interaction, member: discord.Mem
         "type": ptype,
         "date_text": date_text,
     }
+    save_db()
 
     log_channel = interaction.guild.get_channel(PUNISHMENT_LOG_CHANNEL_ID) if PUNISHMENT_LOG_CHANNEL_ID else interaction.channel
     if log_channel is None:
@@ -293,14 +336,45 @@ async def reject(interaction: discord.Interaction, command: str, target: discord
     await interaction.followup.send(f"⚠️ {bold(msg)}", ephemeral=True)
 
 
+# ---------------- Slash command syncing (retries + auto re-sync) ----------------
+async def sync_commands() -> bool:
+    """Pushes the slash commands to the guild, retrying on temporary errors."""
+    for attempt in range(1, 6):
+        try:
+            synced = await bot.tree.sync(guild=GUILD)
+            print(f"🔄 Synced {len(synced)} slash command(s) to guild {GUILD_ID}")
+            return True
+        except Exception as e:
+            print(f"❌ Sync failed (attempt {attempt}/5): {e}")
+            await asyncio.sleep(5 * attempt)
+    return False
+
+
+@tasks.loop(hours=6)
+async def resync_loop():
+    """Runs once at startup (after the bot is ready), then every 6 hours, so the
+    commands can't silently disappear."""
+    await sync_commands()
+
+
+@resync_loop.before_loop
+async def _wait_ready():
+    await bot.wait_until_ready()
+
+
 @bot.event
 async def setup_hook():
     bot.add_dynamic_items(PunishmentDetailsButton)
-    try:
-        synced = await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
-        print(f"🔄 Synced {len(synced)} slash command(s) to guild {GUILD_ID}")
-    except Exception as e:
-        print(f"❌ Failed to sync slash commands: {e}")
+    resync_loop.start()
+
+
+@bot.command(name="sync")
+@commands.guild_only()
+@commands.has_guild_permissions(administrator=True)
+async def sync_cmd(ctx: commands.Context):
+    """Admin only: mention the bot and type 'sync' to re-register the slash commands."""
+    ok = await sync_commands()
+    await ctx.reply("✅ Slash commands re-synced." if ok else "❌ Sync failed, check the logs.")
 
 
 @bot.event
@@ -310,7 +384,14 @@ async def on_ready():
     print(f"🛡️ Moderator role ID: {MOD_ROLE_ID}")
 
 
-@bot.tree.command(name="warn", description="Log a warning card for a member. No Discord action is taken.", guild=discord.Object(id=GUILD_ID))
+@bot.event
+async def on_command_error(ctx: commands.Context, error: commands.CommandError):
+    if isinstance(error, (commands.CommandNotFound, commands.CheckFailure)):
+        return
+    print(f"❌ Prefix command error: {error}")
+
+
+@bot.tree.command(name="warn", description="Log a warning card for a member. No Discord action is taken.", guild=GUILD)
 @app_commands.describe(member="The member being warned", reason="Why they're being warned")
 @app_commands.guild_only()
 @mod_only("manage_messages")
@@ -322,7 +403,7 @@ async def warn_cmd(interaction: discord.Interaction, member: discord.Member, rea
     await issue_punishment(interaction, member, "WARNING", reason)
 
 
-@bot.tree.command(name="mute", description="Time a member out and log a mute card.", guild=discord.Object(id=GUILD_ID))
+@bot.tree.command(name="mute", description="Time a member out and log a mute card.", guild=GUILD)
 @app_commands.describe(member="The member being muted", minutes="How long to mute them for, in minutes", reason="Why they're being muted")
 @app_commands.guild_only()
 @staff_only("moderate_members")
@@ -341,7 +422,7 @@ async def mute_cmd(interaction: discord.Interaction, member: discord.Member, min
     await issue_punishment(interaction, member, "MUTE", f"{reason} (for {minutes}m)")
 
 
-@bot.tree.command(name="timeout", description="Time a member out for minutes, hours or days and log a timeout card.", guild=discord.Object(id=GUILD_ID))
+@bot.tree.command(name="timeout", description="Time a member out for minutes, hours or days and log a timeout card.", guild=GUILD)
 @app_commands.describe(member="The member being timed out", amount="How long (a number)", unit="Minutes, hours or days", reason="Why they're being timed out")
 @app_commands.choices(unit=[
     app_commands.Choice(name="Minutes", value="minutes"),
@@ -369,7 +450,7 @@ async def timeout_cmd(interaction: discord.Interaction, member: discord.Member, 
     await issue_punishment(interaction, member, "TIMEOUT", f"{reason} (for {amount} {unit_label})")
 
 
-@bot.tree.command(name="kick", description="Kick a member and log a kick card.", guild=discord.Object(id=GUILD_ID))
+@bot.tree.command(name="kick", description="Kick a member and log a kick card.", guild=GUILD)
 @app_commands.describe(member="The member being kicked", reason="Why they're being kicked")
 @app_commands.guild_only()
 @mod_only("kick_members")
@@ -388,7 +469,7 @@ async def kick_cmd(interaction: discord.Interaction, member: discord.Member, rea
     await issue_punishment(interaction, member, "KICK", reason)
 
 
-@bot.tree.command(name="ban", description="Ban a member and log a ban card.", guild=discord.Object(id=GUILD_ID))
+@bot.tree.command(name="ban", description="Ban a member and log a ban card.", guild=GUILD)
 @app_commands.describe(member="The member being banned", reason="Why they're being banned")
 @app_commands.guild_only()
 @mod_only("ban_members")
