@@ -14,6 +14,8 @@ Who can use the commands:
     /mute                           -> server Administrators, anyone with the lowest staff
                                          role in STAFF_ROLE_IDS, or anyone above it.
 
+/ban also works on someone who ALREADY LEFT the server: paste their user ID in the member box.
+
 Requirements:
     pip install discord.py Pillow     (discord.py 2.4 or newer)
 
@@ -124,20 +126,11 @@ def bold(text: str) -> str:
         code = ord(ch)
 
         if 65 <= code <= 90:
-            out.append(
-                chr(_BOLD_UPPER_START + (code - 65))
-            )
-
+            out.append(chr(_BOLD_UPPER_START + (code - 65)))
         elif 97 <= code <= 122:
-            out.append(
-                chr(_BOLD_LOWER_START + (code - 97))
-            )
-
+            out.append(chr(_BOLD_LOWER_START + (code - 97)))
         elif 48 <= code <= 57:
-            out.append(
-                chr(_BOLD_DIGIT_START + (code - 48))
-            )
-
+            out.append(chr(_BOLD_DIGIT_START + (code - 48)))
         else:
             out.append(ch)
 
@@ -155,10 +148,7 @@ def load_db():
 
         return (
             int(data.get("counter", 0)),
-            {
-                int(k): v
-                for k, v in data.get("records", {}).items()
-            },
+            {int(k): v for k, v in data.get("records", {}).items()},
         )
 
     except FileNotFoundError:
@@ -171,19 +161,13 @@ def load_db():
 
 def save_db():
     try:
-        os.makedirs(
-            os.path.dirname(DB_PATH),
-            exist_ok=True
-        )
+        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
         tmp = DB_PATH + ".tmp"
 
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(
-                {
-                    "counter": case_counter,
-                    "records": punishment_records
-                },
+                {"counter": case_counter, "records": punishment_records},
                 f,
                 ensure_ascii=False
             )
@@ -205,17 +189,10 @@ print(
 
 def card_name(member: discord.abc.User) -> str:
     """Name shown on the card."""
-    return (
-        clean_for_card(member.display_name)
-        or member.name
-    )
+    return clean_for_card(member.display_name) or member.name
 
 
-def audit_reason(
-    reason: str,
-    action: str,
-    by: discord.abc.User
-) -> str:
+def audit_reason(reason: str, action: str, by: discord.abc.User) -> str:
     """Reason text for Discord's audit log."""
     return f"{reason} — {action} by {by}"[:512]
 
@@ -227,10 +204,7 @@ def audit_reason(
 def staff_only(permission: str):
     """Staff role or higher, plus administrators."""
 
-    async def predicate(
-        interaction: discord.Interaction
-    ) -> bool:
-
+    async def predicate(interaction: discord.Interaction) -> bool:
         user = interaction.user
 
         if user.guild_permissions.administrator:
@@ -238,19 +212,14 @@ def staff_only(permission: str):
 
         staff_roles = [
             r
-            for r in (
-                interaction.guild.get_role(i)
-                for i in STAFF_ROLE_IDS
-            )
+            for r in (interaction.guild.get_role(i) for i in STAFF_ROLE_IDS)
             if r
         ]
 
         if staff_roles and user.top_role >= min(staff_roles):
             return True
 
-        raise app_commands.MissingPermissions(
-            [permission]
-        )
+        raise app_commands.MissingPermissions([permission])
 
     return app_commands.check(predicate)
 
@@ -258,25 +227,18 @@ def staff_only(permission: str):
 def mod_only(permission: str):
     """Moderator role or higher, plus administrators."""
 
-    async def predicate(
-        interaction: discord.Interaction
-    ) -> bool:
-
+    async def predicate(interaction: discord.Interaction) -> bool:
         user = interaction.user
 
         if user.guild_permissions.administrator:
             return True
 
-        mod_role = interaction.guild.get_role(
-            MOD_ROLE_ID
-        )
+        mod_role = interaction.guild.get_role(MOD_ROLE_ID)
 
         if mod_role and user.top_role >= mod_role:
             return True
 
-        raise app_commands.MissingPermissions(
-            [permission]
-        )
+        raise app_commands.MissingPermissions([permission])
 
     return app_commands.check(predicate)
 
@@ -303,10 +265,7 @@ def target_problem(
         interaction.user.id != guild.owner_id
         and member.top_role >= interaction.user.top_role
     ):
-        return (
-            "That member's highest role is equal to "
-            "or above yours."
-        )
+        return "That member's highest role is equal to or above yours."
 
     if (
         needs_bot_rank
@@ -332,33 +291,21 @@ async def send_with_retry(channel, **kwargs):
     backoff_delays = [1, 2, 4, 8, 16]
 
     for attempt in range(max_attempts):
-
         try:
             return await channel.send(**kwargs)
 
         except discord.errors.HTTPException as e:
-
             if e.status == 429:
-
                 if attempt < max_attempts - 1:
                     delay = backoff_delays[attempt]
-
                     print(
-                        f"⏳ Rate limited, retrying in "
-                        f"{delay}s "
-                        f"(attempt {attempt + 1}/"
-                        f"{max_attempts})"
+                        f"⏳ Rate limited, retrying in {delay}s "
+                        f"(attempt {attempt + 1}/{max_attempts})"
                     )
-
                     await asyncio.sleep(delay)
-
                 else:
-                    print(
-                        f"❌ Failed to send message after "
-                        f"{max_attempts} attempts"
-                    )
+                    print(f"❌ Failed to send message after {max_attempts} attempts")
                     raise
-
             else:
                 raise
 
@@ -374,7 +321,6 @@ class PunishmentDetailsButton(
     """View Punishment Details button."""
 
     def __init__(self, case_no: int):
-
         super().__init__(
             discord.ui.Button(
                 label=f"🔍 {bold('View Punishment Details')}",
@@ -392,63 +338,40 @@ class PunishmentDetailsButton(
         item: discord.ui.Button,
         match: re.Match
     ):
-        return cls(
-            int(match["case"])
-        )
+        return cls(int(match["case"]))
 
-    async def callback(
-        self,
-        interaction: discord.Interaction
-    ):
-
-        record = punishment_records.get(
-            self.case_no
-        )
+    async def callback(self, interaction: discord.Interaction):
+        record = punishment_records.get(self.case_no)
 
         if record is None:
             return await interaction.response.send_message(
-                bold(
-                    "Details for this case aren't "
-                    "available anymore."
-                ),
+                bold("Details for this case aren't available anymore."),
                 ephemeral=True,
             )
 
-        display_type = record.get(
-            "display_type",
-            record["type"]
-        )
+        display_type = record.get("display_type", record["type"])
 
-        color_rgb = TYPE_STYLE.get(
-            display_type,
-            TYPE_STYLE[record["type"]]
-        )[0]
+        style = (
+            TYPE_STYLE.get(display_type)
+            or TYPE_STYLE.get(record["type"])
+            or ((150, 150, 150), 0)
+        )
+        color_rgb = style[0]
 
         embed = discord.Embed(
-            title=bold(
-                f"Case ELT-{self.case_no:04d} "
-                f"— {display_type.title()}"
-            ),
-            color=discord.Color.from_rgb(
-                *color_rgb
-            ),
+            title=bold(f"Case ELT-{self.case_no:04d} — {display_type.title()}"),
+            color=discord.Color.from_rgb(*color_rgb),
         )
 
         embed.add_field(
             name=bold("User"),
-            value=(
-                f"<@{record['user_id']}> "
-                f"({bold(record['user_tag'])})"
-            ),
+            value=f"<@{record['user_id']}> ({bold(record['user_tag'])})",
             inline=False,
         )
 
         embed.add_field(
             name=bold("Punisher"),
-            value=(
-                f"<@{record['punisher_id']}> "
-                f"({bold(record['punisher_tag'])})"
-            ),
+            value=f"<@{record['punisher_id']}> ({bold(record['punisher_tag'])})",
             inline=False,
         )
 
@@ -464,10 +387,7 @@ class PunishmentDetailsButton(
             inline=True,
         )
 
-        await interaction.response.send_message(
-            embed=embed,
-            ephemeral=True,
-        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 # ================================================================
@@ -482,46 +402,29 @@ def _warning_is_active(record: dict) -> bool:
 
     return (
         record.get("type") == "WARNING"
-        and record.get(
-            "warning_active",
-            True
-        ) is not False
+        and record.get("warning_active", True) is not False
     )
 
 
 def active_warning_records(member_id: int):
-
     records = [
         (case_no, record)
-        for case_no, record
-        in punishment_records.items()
-        if (
-            record.get("user_id") == member_id
-            and _warning_is_active(record)
-        )
+        for case_no, record in punishment_records.items()
+        if record.get("user_id") == member_id and _warning_is_active(record)
     ]
 
     records.sort(
-        key=lambda item: (
-            item[1].get(
-                "warning_issued_at",
-                ""
-            ),
-            item[0],
-        )
+        key=lambda item: (item[1].get("warning_issued_at", ""), item[0])
     )
 
     return records
 
 
 def active_warning_count(member_id: int) -> int:
-    return len(
-        active_warning_records(member_id)
-    )
+    return len(active_warning_records(member_id))
 
 
 def warning_percent(count: int) -> int:
-
     if count <= 0:
         return 0
 
@@ -535,31 +438,20 @@ def warning_percent(count: int) -> int:
 
 
 def _parse_warning_time(record: dict):
-
-    value = record.get(
-        "warning_issued_at"
-    )
+    value = record.get("warning_issued_at")
 
     if not value:
         return None
 
     try:
-
         dt = datetime.fromisoformat(value)
 
         if dt.tzinfo is None:
-            dt = dt.replace(
-                tzinfo=timezone.utc
-            )
+            dt = dt.replace(tzinfo=timezone.utc)
 
-        return dt.astimezone(
-            timezone.utc
-        )
+        return dt.astimezone(timezone.utc)
 
-    except (
-        TypeError,
-        ValueError
-    ):
+    except (TypeError, ValueError):
         return None
 
 
@@ -569,81 +461,45 @@ async def update_warning_roles(
     count: int
 ):
     """
-    1 warning:
-        Warn 1 role
-
-    2 warnings:
-        Warn 2 role
-        remove Warn 1
-
-    0 warnings:
-        remove both
-
-    3+ warnings:
-        remove both
+    1 warning:  Warn 1 role
+    2 warnings: Warn 2 role (remove Warn 1)
+    0 or 3+:    remove both
     """
 
-    warn1 = guild.get_role(
-        WARN_1_ROLE_ID
-    )
-
-    warn2 = guild.get_role(
-        WARN_2_ROLE_ID
-    )
+    warn1 = guild.get_role(WARN_1_ROLE_ID)
+    warn2 = guild.get_role(WARN_2_ROLE_ID)
 
     if warn1 is None or warn2 is None:
-
-        print(
-            "⚠️ Warning role not found — "
-            "check WARN_1_ROLE_ID / WARN_2_ROLE_ID"
-        )
-
+        print("⚠️ Warning role not found — check WARN_1_ROLE_ID / WARN_2_ROLE_ID")
         return
 
     wanted = set()
 
     if count == 1:
         wanted.add(warn1)
-
     elif count == 2:
         wanted.add(warn2)
 
-    current = {
-        role
-        for role in (warn1, warn2)
-        if role in member.roles
-    }
+    current = {role for role in (warn1, warn2) if role in member.roles}
 
     add_roles = wanted - current
     remove_roles = current - wanted
 
     try:
-
         if add_roles:
-            await member.add_roles(
-                *add_roles,
-                reason="Warning level updated"
-            )
+            await member.add_roles(*add_roles, reason="Warning level updated")
 
         if remove_roles:
-            await member.remove_roles(
-                *remove_roles,
-                reason="Warning level updated"
-            )
+            await member.remove_roles(*remove_roles, reason="Warning level updated")
 
     except discord.Forbidden:
-
         print(
-            f"❌ Bot cannot manage warning roles "
-            f"for {member} — move the bot role above them."
+            f"❌ Bot cannot manage warning roles for {member} "
+            f"— move the bot role above them."
         )
 
     except discord.HTTPException as e:
-
-        print(
-            f"❌ Failed to update warning roles "
-            f"for {member}: {e}"
-        )
+        print(f"❌ Failed to update warning roles for {member}: {e}")
 
 
 # ================================================================
@@ -657,55 +513,32 @@ async def post_warning_cleared_card(
     reason: str,
     cleared_cases=None,
 ):
-    """
-    Posts the green WARNING CLEARED card
-    to the dedicated warning-cleared channel.
-    """
+    """Posts the green WARNING CLEARED card to the dedicated channel."""
 
     global case_counter
 
-    cleared_cases = list(
-        cleared_cases or []
-    )
+    cleared_cases = list(cleared_cases or [])
 
     case_counter += 1
     case_no = case_counter
 
-    date_text = (
-        discord.utils.utcnow()
-        .strftime("%d/%m/%Y")
-    )
+    date_text = discord.utils.utcnow().strftime("%d/%m/%Y")
 
     try:
-
-        avatar_bytes = await (
-            member.display_avatar
-            .replace(
-                size=256,
-                format="png"
-            )
-            .read()
-        )
+        avatar_bytes = await member.display_avatar.replace(
+            size=256, format="png"
+        ).read()
 
     except Exception as e:
-
-        print(
-            f"⚠️ Couldn't fetch avatar for "
-            f"warning-clear card {member}: {e}"
-        )
-
+        print(f"⚠️ Couldn't fetch avatar for warning-clear card {member}: {e}")
         avatar_bytes = None
 
     user_name = card_name(member)
     punisher_name = card_name(punisher)
 
-    max_bytes = min(
-        MAX_BYTES,
-        int(guild.filesize_limit * 0.9)
-    )
+    max_bytes = min(MAX_BYTES, int(guild.filesize_limit * 0.9))
 
     try:
-
         card_bytes = await asyncio.to_thread(
             render_card_gif,
             user_name,
@@ -721,15 +554,12 @@ async def post_warning_cleared_card(
         ext = "gif"
 
     except Exception as e:
-
         print(
             f"⚠️ Warning-clear GIF failed "
-            f"({type(e).__name__}: {e}) "
-            f"— falling back to PNG"
+            f"({type(e).__name__}: {e}) — falling back to PNG"
         )
 
         try:
-
             card_bytes = await asyncio.to_thread(
                 render_card,
                 user_name,
@@ -744,10 +574,8 @@ async def post_warning_cleared_card(
             ext = "png"
 
         except Exception as e2:
-
             print(
-                f"❌ Failed to render "
-                f"warning-clear card: "
+                f"❌ Failed to render warning-clear card: "
                 f"{type(e2).__name__}: {e2}"
             )
 
@@ -768,59 +596,29 @@ async def post_warning_cleared_card(
 
     save_db()
 
-    channel = guild.get_channel(
-        WARNING_CLEAR_CHANNEL_ID
-    )
+    channel = guild.get_channel(WARNING_CLEAR_CHANNEL_ID)
 
     if channel is None:
-
-        print(
-            f"❌ Warning cleared channel "
-            f"{WARNING_CLEAR_CHANNEL_ID} "
-            f"was not found."
-        )
-
+        print(f"❌ Warning cleared channel {WARNING_CLEAR_CHANNEL_ID} was not found.")
         return False
 
     file = discord.File(
         io.BytesIO(card_bytes),
-        filename=(
-            f"warning_cleared_"
-            f"{case_no:04d}.{ext}"
-        ),
+        filename=f"warning_cleared_{case_no:04d}.{ext}",
     )
 
-    view = discord.ui.View(
-        timeout=None
-    )
-
-    view.add_item(
-        PunishmentDetailsButton(case_no)
-    )
+    view = discord.ui.View(timeout=None)
+    view.add_item(PunishmentDetailsButton(case_no))
 
     try:
+        await send_with_retry(channel, file=file, view=view)
 
-        await send_with_retry(
-            channel,
-            file=file,
-            view=view
-        )
-
-        print(
-            f"🟢 WARNING CLEARED "
-            f"case ELT-{case_no:04d} "
-            f"posted for {member}"
-        )
+        print(f"🟢 WARNING CLEARED case ELT-{case_no:04d} posted for {member}")
 
         return True
 
     except Exception as e:
-
-        print(
-            f"❌ Failed to send "
-            f"warning-clear card: {e}"
-        )
-
+        print(f"❌ Failed to send warning-clear card: {e}")
         return False
 
 
@@ -830,7 +628,7 @@ async def post_warning_cleared_card(
 
 async def issue_punishment(
     interaction: discord.Interaction,
-    member: discord.Member,
+    member: discord.abc.User,
     ptype: str,
     reason: str,
     *,
@@ -851,50 +649,25 @@ async def issue_punishment(
 
     save_db()
 
-    render_type = (
-        card_ptype or ptype
-    ).upper()
+    render_type = (card_ptype or ptype).upper()
 
     try:
-
-        avatar_bytes = await (
-            member.display_avatar
-            .replace(
-                size=256,
-                format="png"
-            )
-            .read()
-        )
+        avatar_bytes = await member.display_avatar.replace(
+            size=256, format="png"
+        ).read()
 
     except Exception as e:
-
-        print(
-            f"⚠️ Couldn't fetch avatar for "
-            f"{member}: {e}"
-        )
-
+        print(f"⚠️ Couldn't fetch avatar for {member}: {e}")
         avatar_bytes = None
 
-    date_text = (
-        discord.utils.utcnow()
-        .strftime("%d/%m/%Y")
-    )
+    date_text = discord.utils.utcnow().strftime("%d/%m/%Y")
 
     user_name = card_name(member)
-    punisher_name = card_name(
-        interaction.user
-    )
+    punisher_name = card_name(interaction.user)
 
-    max_bytes = min(
-        MAX_BYTES,
-        int(
-            interaction.guild.filesize_limit
-            * 0.9
-        )
-    )
+    max_bytes = min(MAX_BYTES, int(interaction.guild.filesize_limit * 0.9))
 
     try:
-
         card_bytes = await asyncio.to_thread(
             render_card_gif,
             user_name,
@@ -910,15 +683,12 @@ async def issue_punishment(
         ext = "gif"
 
     except Exception as e:
-
         print(
-            f"⚠️ Animated card failed "
-            f"({type(e).__name__}: {e}) "
+            f"⚠️ Animated card failed ({type(e).__name__}: {e}) "
             f"— falling back to the still card"
         )
 
         try:
-
             card_bytes = await asyncio.to_thread(
                 render_card,
                 user_name,
@@ -933,12 +703,7 @@ async def issue_punishment(
             ext = "png"
 
         except Exception as e2:
-
-            print(
-                f"❌ Failed to render "
-                f"punishment card: "
-                f"{type(e2).__name__}: {e2}"
-            )
+            print(f"❌ Failed to render punishment card: {type(e2).__name__}: {e2}")
 
             await interaction.followup.send(
                 f"⚠️ {bold('Something went wrong generating the punishment card.')}",
@@ -951,9 +716,7 @@ async def issue_punishment(
         "user_id": member.id,
         "user_tag": str(member),
         "punisher_id": interaction.user.id,
-        "punisher_tag": str(
-            interaction.user
-        ),
+        "punisher_tag": str(interaction.user),
         "reason": reason,
         "type": ptype,
         "display_type": render_type,
@@ -961,16 +724,12 @@ async def issue_punishment(
     }
 
     if record_extra:
-        punishment_records[
-            case_no
-        ].update(record_extra)
+        punishment_records[case_no].update(record_extra)
 
     save_db()
 
     log_channel = (
-        interaction.guild.get_channel(
-            PUNISHMENT_LOG_CHANNEL_ID
-        )
+        interaction.guild.get_channel(PUNISHMENT_LOG_CHANNEL_ID)
         if PUNISHMENT_LOG_CHANNEL_ID
         else interaction.channel
     )
@@ -980,41 +739,22 @@ async def issue_punishment(
 
     file = discord.File(
         io.BytesIO(card_bytes),
-        filename=(
-            f"punishment_case_"
-            f"{case_no:04d}.{ext}"
-        ),
+        filename=f"punishment_case_{case_no:04d}.{ext}",
     )
 
-    view = discord.ui.View(
-        timeout=None
-    )
-
-    view.add_item(
-        PunishmentDetailsButton(case_no)
-    )
+    view = discord.ui.View(timeout=None)
+    view.add_item(PunishmentDetailsButton(case_no))
 
     try:
-
-        await send_with_retry(
-            log_channel,
-            file=file,
-            view=view
-        )
+        await send_with_retry(log_channel, file=file, view=view)
 
         print(
-            f"✅ Case ELT-{case_no:04d} "
-            f"({ptype}/{render_type}) "
-            f"posted for {member} "
-            f"by {interaction.user}"
+            f"✅ Case ELT-{case_no:04d} ({ptype}/{render_type}) "
+            f"posted for {member} by {interaction.user}"
         )
 
     except Exception as e:
-
-        print(
-            f"❌ Failed to send "
-            f"punishment card: {e}"
-        )
+        print(f"❌ Failed to send punishment card: {e}")
 
         await interaction.followup.send(
             f"⚠️ {bold('Generated the card but could not post it — check my permissions in that channel.')}",
@@ -1037,21 +777,14 @@ async def issue_punishment(
 async def reject(
     interaction: discord.Interaction,
     command: str,
-    target: discord.Member,
+    target: discord.abc.User,
     msg: str
 ):
     """Sends the ephemeral rejection and logs it."""
 
-    print(
-        f"🚫 /{command}: "
-        f"{interaction.user} -> "
-        f"{target} blocked: {msg}"
-    )
+    print(f"🚫 /{command}: {interaction.user} -> {target} blocked: {msg}")
 
-    await interaction.followup.send(
-        f"⚠️ {bold(msg)}",
-        ephemeral=True
-    )
+    await interaction.followup.send(f"⚠️ {bold(msg)}", ephemeral=True)
 
 
 # ================================================================
@@ -1059,34 +792,20 @@ async def reject(
 # ================================================================
 
 async def expire_warnings():
-    """
-    If 30 days pass without a new warning,
-    clear the entire active warning streak.
-    """
+    """If 30 days pass without a new warning, clear the whole active streak."""
 
-    guild = bot.get_guild(
-        GUILD_ID
-    )
+    guild = bot.get_guild(GUILD_ID)
 
     if guild is None:
         return
 
-    now = datetime.now(
-        timezone.utc
-    )
+    now = datetime.now(timezone.utc)
 
     by_member = {}
 
     for case_no, record in punishment_records.items():
-
         if _warning_is_active(record):
-
-            by_member.setdefault(
-                record["user_id"],
-                []
-            ).append(
-                (case_no, record)
-            )
+            by_member.setdefault(record["user_id"], []).append((case_no, record))
 
     changed = False
 
@@ -1095,36 +814,23 @@ async def expire_warnings():
         latest = max(
             records,
             key=lambda item: (
-                _parse_warning_time(
-                    item[1]
-                )
-                or datetime.min.replace(
-                    tzinfo=timezone.utc
-                ),
+                _parse_warning_time(item[1])
+                or datetime.min.replace(tzinfo=timezone.utc),
                 item[0],
             ),
         )
 
-        latest_time = _parse_warning_time(
-            latest[1]
-        )
+        latest_time = _parse_warning_time(latest[1])
 
-        # Old warning records don't have an exact
-        # timestamp, so don't guess their expiry.
+        # Old warning records don't have an exact timestamp,
+        # so don't guess their expiry.
         if latest_time is None:
             continue
 
-        if (
-            now - latest_time
-            < timedelta(
-                days=WARNING_EXPIRE_DAYS
-            )
-        ):
+        if now - latest_time < timedelta(days=WARNING_EXPIRE_DAYS):
             continue
 
-        member = guild.get_member(
-            member_id
-        )
+        member = guild.get_member(member_id)
 
         if member is None:
             continue
@@ -1132,51 +838,25 @@ async def expire_warnings():
         cleared_cases = []
 
         for case_no, record in records:
-
-            record[
-                "warning_active"
-            ] = False
-
-            record[
-                "warning_cleared_at"
-            ] = now.isoformat()
-
-            record[
-                "warning_clear_method"
-            ] = "automatic_30_day_expiry"
-
-            cleared_cases.append(
-                case_no
-            )
+            record["warning_active"] = False
+            record["warning_cleared_at"] = now.isoformat()
+            record["warning_clear_method"] = "automatic_30_day_expiry"
+            cleared_cases.append(case_no)
 
         changed = True
 
-        await update_warning_roles(
-            guild,
-            member,
-            0
-        )
+        await update_warning_roles(guild, member, 0)
 
         reason = (
-            f"No new warning was received "
-            f"for {WARNING_EXPIRE_DAYS} days. "
-            f"All active warnings were "
-            f"automatically cleared."
+            f"No new warning was received for {WARNING_EXPIRE_DAYS} days. "
+            f"All active warnings were automatically cleared."
         )
 
-        punisher = (
-            guild.me
-            or bot.user
-        )
+        punisher = guild.me or bot.user
 
         if punisher:
-
             await post_warning_cleared_card(
-                guild,
-                member,
-                punisher,
-                reason,
-                cleared_cases,
+                guild, member, punisher, reason, cleared_cases
             )
 
     if changed:
@@ -1201,53 +881,34 @@ async def sync_commands() -> bool:
     """Push slash commands to the guild."""
 
     for attempt in range(1, 6):
-
         try:
+            synced = await bot.tree.sync(guild=GUILD)
 
-            synced = await bot.tree.sync(
-                guild=GUILD
-            )
-
-            print(
-                f"🔄 Synced {len(synced)} "
-                f"slash command(s) to guild "
-                f"{GUILD_ID}"
-            )
+            print(f"🔄 Synced {len(synced)} slash command(s) to guild {GUILD_ID}")
 
             return True
 
         except Exception as e:
+            print(f"❌ Sync failed (attempt {attempt}/5): {e}")
 
-            print(
-                f"❌ Sync failed "
-                f"(attempt {attempt}/5): {e}"
-            )
-
-            await asyncio.sleep(
-                5 * attempt
-            )
+            await asyncio.sleep(5 * attempt)
 
     return False
 
 
 @tasks.loop(hours=6)
 async def resync_loop():
-
     await sync_commands()
 
 
 @resync_loop.before_loop
 async def _wait_ready():
-
     await bot.wait_until_ready()
 
 
 @bot.event
 async def setup_hook():
-
-    bot.add_dynamic_items(
-        PunishmentDetailsButton
-    )
+    bot.add_dynamic_items(PunishmentDetailsButton)
 
     resync_loop.start()
     warning_expiry_loop.start()
@@ -1259,20 +920,14 @@ async def setup_hook():
 
 @bot.command(name="sync")
 @commands.guild_only()
-@commands.has_guild_permissions(
-    administrator=True
-)
-async def sync_cmd(
-    ctx: commands.Context
-):
-
+@commands.has_guild_permissions(administrator=True)
+async def sync_cmd(ctx: commands.Context):
     ok = await sync_commands()
 
     await ctx.reply(
         "✅ Slash commands re-synced."
         if ok
-        else
-        "❌ Sync failed, check the logs."
+        else "❌ Sync failed, check the logs."
     )
 
 
@@ -1282,31 +937,11 @@ async def sync_cmd(
 
 @bot.event
 async def on_ready():
-
-    print(
-        f"✅ Logged in as {bot.user} "
-        f"(ID: {bot.user.id})"
-    )
-
-    print(
-        f"👮 Staff role IDs: "
-        f"{sorted(STAFF_ROLE_IDS) or 'none set'}"
-    )
-
-    print(
-        f"🛡️ Moderator role ID: "
-        f"{MOD_ROLE_ID}"
-    )
-
-    print(
-        f"⚠️ Warning expiration: "
-        f"{WARNING_EXPIRE_DAYS} days"
-    )
-
-    print(
-        f"🟢 Warning cleared channel: "
-        f"{WARNING_CLEAR_CHANNEL_ID}"
-    )
+    print(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
+    print(f"👮 Staff role IDs: {sorted(STAFF_ROLE_IDS) or 'none set'}")
+    print(f"🛡️ Moderator role ID: {MOD_ROLE_ID}")
+    print(f"⚠️ Warning expiration: {WARNING_EXPIRE_DAYS} days")
+    print(f"🟢 Warning cleared channel: {WARNING_CLEAR_CHANNEL_ID}")
 
 
 @bot.event
@@ -1314,19 +949,10 @@ async def on_command_error(
     ctx: commands.Context,
     error: commands.CommandError
 ):
-
-    if isinstance(
-        error,
-        (
-            commands.CommandNotFound,
-            commands.CheckFailure
-        )
-    ):
+    if isinstance(error, (commands.CommandNotFound, commands.CheckFailure)):
         return
 
-    print(
-        f"❌ Prefix command error: {error}"
-    )
+    print(f"❌ Prefix command error: {error}")
 
 
 # ================================================================
@@ -1337,8 +963,7 @@ async def on_command_error(
     name="warn",
     description=(
         "Give a warning to a member. "
-        "Warnings expire after 30 days "
-        "without a new warning."
+        "Warnings expire after 30 days without a new warning."
     ),
     guild=GUILD
 )
@@ -1351,74 +976,36 @@ async def on_command_error(
 async def warn_cmd(
     interaction: discord.Interaction,
     member: discord.Member,
-    reason: app_commands.Range[
-        str,
-        1,
-        300
-    ],
+    reason: app_commands.Range[str, 1, 300],
 ):
 
-    await interaction.response.defer(
-        ephemeral=True
-    )
+    await interaction.response.defer(ephemeral=True)
 
-    problem = target_problem(
-        interaction,
-        member,
-        needs_bot_rank=False
-    )
+    problem = target_problem(interaction, member, needs_bot_rank=False)
 
     if problem:
-
-        return await reject(
-            interaction,
-            "warn",
-            member,
-            problem
-        )
+        return await reject(interaction, "warn", member, problem)
 
     # Count active warnings.
-    warning_count = (
-        active_warning_count(
-            member.id
-        )
-        + 1
-    )
+    warning_count = active_warning_count(member.id) + 1
 
-    percent = warning_percent(
-        warning_count
-    )
+    percent = warning_percent(warning_count)
 
-    issued_at = (
-        discord.utils.utcnow()
-        .isoformat()
-    )
+    issued_at = discord.utils.utcnow().isoformat()
 
     # Warning 1 / 2 = WARNING card.
     # Warning 3+ = BAN card.
-    card_type = (
-        "BAN"
-        if warning_count >= 3
-        else
-        "WARNING"
-    )
+    card_type = "BAN" if warning_count >= 3 else "WARNING"
 
     card_reason = reason
 
     if warning_count >= 3:
-
         card_reason = (
-            f"{reason} — "
-            f"3 active warnings reached. "
-            f"Automatic ban applied."
+            f"{reason} — 3 active warnings reached. Automatic ban applied."
         )[:300]
 
     # Update warning roles.
-    await update_warning_roles(
-        interaction.guild,
-        member,
-        warning_count
-    )
+    await update_warning_roles(interaction.guild, member, warning_count)
 
     record_extra = {
         "warning_active": True,
@@ -1428,33 +1015,20 @@ async def warn_cmd(
     }
 
     if warning_count >= 3:
-        record_extra[
-            "automatic_ban"
-        ] = True
+        record_extra["automatic_ban"] = True
 
-    # WARNING in punishment_card.py has a
-    # default severity of 33%.
-    #
-    # Temporarily change it to 33 / 66
-    # for warning 1 / warning 2.
-    #
-    # The lock prevents two simultaneous
-    # warning commands from changing it
+    # WARNING in punishment_card.py has a default severity of 33%.
+    # Temporarily change it to 33 / 66 for warning 1 / warning 2.
+    # The lock prevents two simultaneous warnings from changing it
     # at the same time.
 
     async with warning_card_style_lock:
 
-        original_warning_style = (
-            TYPE_STYLE["WARNING"]
-        )
+        original_warning_style = TYPE_STYLE["WARNING"]
 
-        TYPE_STYLE["WARNING"] = (
-            original_warning_style[0],
-            percent
-        )
+        TYPE_STYLE["WARNING"] = (original_warning_style[0], percent)
 
         try:
-
             success = await issue_punishment(
                 interaction,
                 member,
@@ -1465,10 +1039,7 @@ async def warn_cmd(
             )
 
         finally:
-
-            TYPE_STYLE[
-                "WARNING"
-            ] = original_warning_style
+            TYPE_STYLE["WARNING"] = original_warning_style
 
     if not success:
         return
@@ -1477,48 +1048,37 @@ async def warn_cmd(
     if warning_count >= 3:
 
         try:
-
             await member.ban(
                 reason=audit_reason(
-                    f"3 active warnings reached: "
-                    f"{reason}",
+                    f"3 active warnings reached: {reason}",
                     "automatically banned",
                     bot.user,
                 )
             )
 
             print(
-                f"🔨 Automatic ban applied "
-                f"to {member} after "
-                f"warning #{warning_count}"
+                f"🔨 Automatic ban applied to {member} "
+                f"after warning #{warning_count}"
             )
 
         except discord.Forbidden:
-
             print(
-                f"❌ Automatic ban failed "
-                f"for {member}: bot lacks "
-                f"ban permission/hierarchy."
+                f"❌ Automatic ban failed for {member}: "
+                f"bot lacks ban permission/hierarchy."
             )
 
             await interaction.followup.send(
-                "⚠️ The 3rd-warning BAN card "
-                "was posted, but Discord refused "
-                "the automatic ban. Check my Ban "
-                "Members permission and role position.",
+                "⚠️ The 3rd-warning BAN card was posted, but Discord refused "
+                "the automatic ban. Check my Ban Members permission and "
+                "role position.",
                 ephemeral=True,
             )
 
         except discord.HTTPException as e:
-
-            print(
-                f"❌ Automatic ban HTTPException "
-                f"for {member}: {e}"
-            )
+            print(f"❌ Automatic ban HTTPException for {member}: {e}")
 
             await interaction.followup.send(
-                f"⚠️ The 3rd-warning BAN card "
-                f"was posted, but the automatic "
+                f"⚠️ The 3rd-warning BAN card was posted, but the automatic "
                 f"ban failed: {e}",
                 ephemeral=True,
             )
@@ -1530,58 +1090,31 @@ async def warn_cmd(
 
 @bot.tree.command(
     name="unwarn",
-    description=(
-        "Remove the most recent active "
-        "warning from a member."
-    ),
+    description="Remove the most recent active warning from a member.",
     guild=GUILD
 )
 @app_commands.describe(
-    member=(
-        "The member whose latest "
-        "warning should be removed"
-    ),
-    reason=(
-        "Why the warning is being removed"
-    ),
+    member="The member whose latest warning should be removed",
+    reason="Why the warning is being removed",
 )
 @app_commands.guild_only()
 @mod_only("manage_messages")
 async def unwarn_cmd(
     interaction: discord.Interaction,
     member: discord.Member,
-    reason: app_commands.Range[
-        str,
-        1,
-        300
-    ],
+    reason: app_commands.Range[str, 1, 300],
 ):
 
-    await interaction.response.defer(
-        ephemeral=True
-    )
+    await interaction.response.defer(ephemeral=True)
 
-    problem = target_problem(
-        interaction,
-        member,
-        needs_bot_rank=False
-    )
+    problem = target_problem(interaction, member, needs_bot_rank=False)
 
     if problem:
+        return await reject(interaction, "unwarn", member, problem)
 
-        return await reject(
-            interaction,
-            "unwarn",
-            member,
-            problem
-        )
-
-    active = active_warning_records(
-        member.id
-    )
+    active = active_warning_records(member.id)
 
     if not active:
-
         return await interaction.followup.send(
             f"ℹ️ {member.mention} has no active warnings.",
             ephemeral=True,
@@ -1591,53 +1124,23 @@ async def unwarn_cmd(
     # This is useful for accidental/wrong warnings.
     case_no, record = active[-1]
 
-    record[
-        "warning_active"
-    ] = False
+    record["warning_active"] = False
+    record["warning_cleared_at"] = discord.utils.utcnow().isoformat()
+    record["warning_cleared_by_id"] = interaction.user.id
+    record["warning_cleared_by_tag"] = str(interaction.user)
+    record["warning_clear_method"] = "manual_unwarn"
+    record["warning_clear_reason"] = reason
 
-    record[
-        "warning_cleared_at"
-    ] = (
-        discord.utils.utcnow()
-        .isoformat()
-    )
-
-    record[
-        "warning_cleared_by_id"
-    ] = interaction.user.id
-
-    record[
-        "warning_cleared_by_tag"
-    ] = str(
-        interaction.user
-    )
-
-    record[
-        "warning_clear_method"
-    ] = "manual_unwarn"
-
-    record[
-        "warning_clear_reason"
-    ] = reason
-
-    remaining = active_warning_count(
-        member.id
-    )
+    remaining = active_warning_count(member.id)
 
     # Restore correct role level.
-    await update_warning_roles(
-        interaction.guild,
-        member,
-        remaining
-    )
+    await update_warning_roles(interaction.guild, member, remaining)
 
     save_db()
 
     clear_reason = (
-        f"Warning ELT-{case_no:04d} "
-        f"was removed by "
-        f"{card_name(interaction.user)}. "
-        f"Reason: {reason}"
+        f"Warning ELT-{case_no:04d} was removed by "
+        f"{card_name(interaction.user)}. Reason: {reason}"
     )[:300]
 
     await post_warning_cleared_card(
@@ -1649,10 +1152,8 @@ async def unwarn_cmd(
     )
 
     await interaction.followup.send(
-        f"🟢 Warning ELT-{case_no:04d} "
-        f"removed from {member.mention}. "
-        f"Active warnings remaining: "
-        f"**{remaining}**.",
+        f"🟢 Warning ELT-{case_no:04d} removed from {member.mention}. "
+        f"Active warnings remaining: **{remaining}**.",
         ephemeral=True,
     )
 
@@ -1668,10 +1169,7 @@ async def unwarn_cmd(
 )
 @app_commands.describe(
     member="The member being muted",
-    minutes=(
-        "How long to mute them for, "
-        "in minutes"
-    ),
+    minutes="How long to mute them for, in minutes",
     reason="Why they're being muted"
 )
 @app_commands.guild_only()
@@ -1679,65 +1177,31 @@ async def unwarn_cmd(
 async def mute_cmd(
     interaction: discord.Interaction,
     member: discord.Member,
-    minutes: app_commands.Range[
-        int,
-        1,
-        40320
-    ],
-    reason: app_commands.Range[
-        str,
-        1,
-        300
-    ]
+    minutes: app_commands.Range[int, 1, 40320],
+    reason: app_commands.Range[str, 1, 300]
 ):
 
-    await interaction.response.defer(
-        ephemeral=True
-    )
+    await interaction.response.defer(ephemeral=True)
 
-    problem = target_problem(
-        interaction,
-        member
-    )
+    problem = target_problem(interaction, member)
 
     if problem:
-
-        return await reject(
-            interaction,
-            "mute",
-            member,
-            problem
-        )
+        return await reject(interaction, "mute", member, problem)
 
     try:
-
         await member.timeout(
-            timedelta(
-                minutes=minutes
-            ),
-            reason=audit_reason(
-                reason,
-                "muted",
-                interaction.user
-            )
+            timedelta(minutes=minutes),
+            reason=audit_reason(reason, "muted", interaction.user)
         )
 
     except discord.Forbidden:
-
         return await reject(
-            interaction,
-            "mute",
-            member,
-            "I do not have permission "
-            "to time out that member."
+            interaction, "mute", member,
+            "I do not have permission to time out that member."
         )
 
     except discord.HTTPException as e:
-
-        print(
-            f"❌ /mute HTTPException "
-            f"for {member}: {e}"
-        )
+        print(f"❌ /mute HTTPException for {member}: {e}")
 
         return await interaction.followup.send(
             f"⚠️ {bold('Failed to mute:')} {e}",
@@ -1758,10 +1222,7 @@ async def mute_cmd(
 
 @bot.tree.command(
     name="timeout",
-    description=(
-        "Time a member out for minutes, "
-        "hours or days and log a timeout card."
-    ),
+    description="Time a member out for minutes, hours or days and log a timeout card.",
     guild=GUILD
 )
 @app_commands.describe(
@@ -1772,18 +1233,9 @@ async def mute_cmd(
 )
 @app_commands.choices(
     unit=[
-        app_commands.Choice(
-            name="Minutes",
-            value="minutes"
-        ),
-        app_commands.Choice(
-            name="Hours",
-            value="hours"
-        ),
-        app_commands.Choice(
-            name="Days",
-            value="days"
-        ),
+        app_commands.Choice(name="Minutes", value="minutes"),
+        app_commands.Choice(name="Hours", value="hours"),
+        app_commands.Choice(name="Days", value="days"),
     ]
 )
 @app_commands.guild_only()
@@ -1791,100 +1243,53 @@ async def mute_cmd(
 async def timeout_cmd(
     interaction: discord.Interaction,
     member: discord.Member,
-    amount: app_commands.Range[
-        int,
-        1,
-        40320
-    ],
+    amount: app_commands.Range[int, 1, 40320],
     unit: app_commands.Choice[str],
-    reason: app_commands.Range[
-        str,
-        1,
-        300
-    ]
+    reason: app_commands.Range[str, 1, 300]
 ):
 
-    await interaction.response.defer(
-        ephemeral=True
-    )
+    await interaction.response.defer(ephemeral=True)
 
-    duration = timedelta(
-        **{
-            unit.value: amount
-        }
-    )
+    duration = timedelta(**{unit.value: amount})
 
-    if duration > timedelta(
-        days=28
-    ):
-
+    if duration > timedelta(days=28):
         return await reject(
-            interaction,
-            "timeout",
-            member,
-            "Discord only allows timeouts "
-            "up to 28 days."
+            interaction, "timeout", member,
+            "Discord only allows timeouts up to 28 days."
         )
 
-    problem = target_problem(
-        interaction,
-        member
-    )
+    problem = target_problem(interaction, member)
 
     if problem:
-
-        return await reject(
-            interaction,
-            "timeout",
-            member,
-            problem
-        )
+        return await reject(interaction, "timeout", member, problem)
 
     try:
-
         await member.timeout(
             duration,
-            reason=audit_reason(
-                reason,
-                "timed out",
-                interaction.user
-            )
+            reason=audit_reason(reason, "timed out", interaction.user)
         )
 
     except discord.Forbidden:
-
         return await reject(
-            interaction,
-            "timeout",
-            member,
-            "I do not have permission "
-            "to time out that member."
+            interaction, "timeout", member,
+            "I do not have permission to time out that member."
         )
 
     except discord.HTTPException as e:
-
-        print(
-            f"❌ /timeout HTTPException "
-            f"for {member}: {e}"
-        )
+        print(f"❌ /timeout HTTPException for {member}: {e}")
 
         return await interaction.followup.send(
             f"⚠️ {bold('Failed to time out:')} {e}",
             ephemeral=True
         )
 
-    unit_label = (
-        unit.value
-        if amount != 1
-        else unit.value[:-1]
-    )
+    unit_label = unit.value if amount != 1 else unit.value[:-1]
 
     await issue_punishment(
         interaction,
         member,
         "TIMEOUT",
-        f"{reason} "
-        f"(for {amount} {unit_label})"
+        f"{reason} (for {amount} {unit_label})"
     )
 
 
@@ -1906,73 +1311,40 @@ async def timeout_cmd(
 async def kick_cmd(
     interaction: discord.Interaction,
     member: discord.Member,
-    reason: app_commands.Range[
-        str,
-        1,
-        300
-    ]
+    reason: app_commands.Range[str, 1, 300]
 ):
 
-    await interaction.response.defer(
-        ephemeral=True
-    )
+    await interaction.response.defer(ephemeral=True)
 
-    problem = target_problem(
-        interaction,
-        member
-    )
+    problem = target_problem(interaction, member)
 
     if problem:
-
-        return await reject(
-            interaction,
-            "kick",
-            member,
-            problem
-        )
+        return await reject(interaction, "kick", member, problem)
 
     try:
-
         await member.kick(
-            reason=audit_reason(
-                reason,
-                "kicked",
-                interaction.user
-            )
+            reason=audit_reason(reason, "kicked", interaction.user)
         )
 
     except discord.Forbidden:
-
         return await reject(
-            interaction,
-            "kick",
-            member,
-            "I do not have permission "
-            "to kick that member."
+            interaction, "kick", member,
+            "I do not have permission to kick that member."
         )
 
     except discord.HTTPException as e:
-
-        print(
-            f"❌ /kick HTTPException "
-            f"for {member}: {e}"
-        )
+        print(f"❌ /kick HTTPException for {member}: {e}")
 
         return await interaction.followup.send(
             f"⚠️ {bold('Failed to kick:')} {e}",
             ephemeral=True
         )
 
-    await issue_punishment(
-        interaction,
-        member,
-        "KICK",
-        reason
-    )
+    await issue_punishment(interaction, member, "KICK", reason)
 
 
 # ================================================================
-# /BAN
+# /BAN  (also works on someone who already left the server)
 # ================================================================
 
 @bot.tree.command(
@@ -1981,77 +1353,55 @@ async def kick_cmd(
     guild=GUILD
 )
 @app_commands.describe(
-    member="The member being banned",
+    member="Who to ban (can be someone who already left: paste their user ID)",
     reason="Why they're being banned"
 )
 @app_commands.guild_only()
 @mod_only("ban_members")
 async def ban_cmd(
     interaction: discord.Interaction,
-    member: discord.Member,
-    reason: app_commands.Range[
-        str,
-        1,
-        300
-    ]
+    member: discord.User,
+    reason: app_commands.Range[str, 1, 300]
 ):
 
-    await interaction.response.defer(
-        ephemeral=True
-    )
+    await interaction.response.defer(ephemeral=True)
 
-    problem = target_problem(
-        interaction,
-        member
-    )
+    guild = interaction.guild
+    in_server = guild.get_member(member.id)
+
+    if in_server is not None:
+        problem = target_problem(interaction, in_server)
+    elif member.id == interaction.user.id:
+        problem = "You can't punish yourself."
+    elif bot.user and member.id == bot.user.id:
+        problem = "I can't punish myself."
+    else:
+        problem = None
 
     if problem:
-
-        return await reject(
-            interaction,
-            "ban",
-            member,
-            problem
-        )
+        return await reject(interaction, "ban", member, problem)
 
     try:
-
-        await member.ban(
-            reason=audit_reason(
-                reason,
-                "banned",
-                interaction.user
-            )
+        await guild.ban(
+            member,
+            reason=audit_reason(reason, "banned", interaction.user)
         )
 
     except discord.Forbidden:
-
         return await reject(
-            interaction,
-            "ban",
-            member,
-            "I do not have permission "
-            "to ban that member."
+            interaction, "ban", member,
+            "I do not have permission to ban that member."
         )
 
     except discord.HTTPException as e:
-
-        print(
-            f"❌ /ban HTTPException "
-            f"for {member}: {e}"
-        )
+        print(f"❌ /ban HTTPException for {member}: {e}")
 
         return await interaction.followup.send(
             f"⚠️ {bold('Failed to ban:')} {e}",
             ephemeral=True
         )
 
-    await issue_punishment(
-        interaction,
-        member,
-        "BAN",
-        reason
-    )
+    await issue_punishment(interaction, member, "BAN", reason)
 
 
 # ================================================================
@@ -2063,150 +1413,52 @@ async def on_app_command_error(
     interaction: discord.Interaction,
     error: app_commands.AppCommandError,
 ):
-    """
-    Prints the COMPLETE traceback to Railway.
-    This is important because the previous handler was
-    hiding the exact line causing the error.
-    """
+    """Prints the full traceback to Railway and tells the user what went wrong."""
 
-    print(
-        "\n" + "=" * 70
-    )
+    command_name = interaction.command.name if interaction.command else "unknown"
 
-    print(
-        "❌ APP COMMAND ERROR"
-    )
+    print("\n" + "=" * 70)
+    print("❌ APP COMMAND ERROR")
+    print("=" * 70)
+    print(f"Command: /{command_name}")
+    print(f"User: {interaction.user} ({interaction.user.id})")
+    print(f"Error type: {type(error).__name__}")
+    print(f"Error: {error}")
 
-    print(
-        "=" * 70
-    )
-
-    command_name = (
-        interaction.command.name
-        if interaction.command
-        else "unknown"
-    )
-
-    print(
-        f"Command: /{command_name}"
-    )
-
-    print(
-        f"User: {interaction.user} "
-        f"({interaction.user.id})"
-    )
-
-    if interaction.guild:
-
-        print(
-            f"Guild: {interaction.guild.name} "
-            f"({interaction.guild.id})"
-        )
-
-    else:
-
-        print(
-            "Guild: DM"
-        )
-
-    print(
-        f"Error type: "
-        f"{type(error).__name__}"
-    )
-
-    print(
-        f"Error: {error}"
-    )
-
-    original = getattr(
-        error,
-        "original",
-        None
-    )
+    original = getattr(error, "original", None)
 
     if original is not None:
+        print(f"Original error type: {type(original).__name__}")
+        print(f"Original error: {original}")
 
-        print(
-            f"Original error type: "
-            f"{type(original).__name__}"
-        )
+    print("\nFULL TRACEBACK:")
+    traceback.print_exception(type(error), error, error.__traceback__)
 
-        print(
-            f"Original error: "
-            f"{original}"
-        )
+    if original is not None and original is not error:
+        print("\nORIGINAL TRACEBACK:")
+        traceback.print_exception(type(original), original, original.__traceback__)
 
-    print(
-        "\nFULL TRACEBACK:"
-    )
+    print("=" * 70 + "\n")
 
-    traceback.print_exception(
-        type(error),
-        error,
-        error.__traceback__,
-    )
+    if isinstance(error, app_commands.MissingPermissions):
+        msg = f"⚠️ {bold('You do not have permission to do that.')}"
 
-    if (
-        original is not None
-        and original is not error
-    ):
-
-        print(
-            "\nORIGINAL TRACEBACK:"
-        )
-
-        traceback.print_exception(
-            type(original),
-            original,
-            original.__traceback__,
-        )
-
-    print(
-        "=" * 70 + "\n"
-    )
-
-    if isinstance(
-        error,
-        app_commands.MissingPermissions
-    ):
-
+    elif isinstance(error, app_commands.TransformerError):
         msg = (
-            f"⚠️ "
-            f"{bold('You do not have permission to do that.')}"
+            f"⚠️ {bold('I could not find that member in the server — they may have left.')}"
         )
 
-    elif isinstance(
-        error,
-        app_commands.CheckFailure
-    ):
-
-        msg = (
-            f"⚠️ "
-            f"{bold('You are not allowed to use this command.')}"
-        )
+    elif isinstance(error, app_commands.CheckFailure):
+        msg = f"⚠️ {bold('You are not allowed to use this command.')}"
 
     else:
-
-        msg = (
-            f"⚠️ "
-            f"{bold('Something went wrong running that command.')}"
-        )
+        msg = f"⚠️ {bold('Something went wrong running that command.')}"
 
     try:
-
         if interaction.response.is_done():
-
-            await interaction.followup.send(
-                msg,
-                ephemeral=True
-            )
-
+            await interaction.followup.send(msg, ephemeral=True)
         else:
-
-            await interaction.response.send_message(
-                msg,
-                ephemeral=True
-            )
+            await interaction.response.send_message(msg, ephemeral=True)
 
     except discord.HTTPException:
         pass
@@ -2217,11 +1469,9 @@ async def on_app_command_error(
 # ================================================================
 
 if not TOKEN:
-
     raise SystemExit(
         "DISCORD_TOKEN is not set. "
-        "Add it in Railway's Variables tab, "
-        "then redeploy."
+        "Add it in Railway's Variables tab, then redeploy."
     )
 
 
