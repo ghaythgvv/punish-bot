@@ -8,11 +8,17 @@ ANIMATED punishment card with the target's own avatar and display name, plus a
 "View Punishment Details" button underneath. If the animated card can't be made
 for any reason, it falls back to the still PNG card from punishment_card.py.
 
-Who can use the commands:
-    /warn /unwarn /timeout /kick /ban -> members with the Moderator role (MOD_ROLE_ID) or
-                                         any role ABOVE it, plus server Administrators.
-    /mute                           -> server Administrators, anyone with the lowest staff
-                                         role in STAFF_ROLE_IDS, or anyone above it.
+Who can use what:
+    Staff (lowest role in STAFF_ROLE_IDS, or above) -> /warn ONLY
+    Moderators (MOD_ROLE_ID, or above)              -> /warn /unwarn /mute /timeout /kick
+    Administrators + server owner                   -> everything, including /ban
+
+Nobody can punish: the server owner, an Administrator, or anyone whose top role is ABOVE the
+Moderator role. And nobody can punish someone whose top role is equal to or above their own.
+
+Bans: only Administrators can /ban and only they trigger the automatic ban on the 3rd warning
+(set MODS_CAN_BAN = True below to let Moderators do it too). When a Staff member or Moderator
+gives a 3rd warning, no ban happens: the warning is posted and the Administrators are pinged.
 
 /ban also works on someone who ALREADY LEFT the server: paste their user ID in the member box.
 
@@ -71,6 +77,13 @@ PUNISHMENT_LOG_CHANNEL_ID = None
 # Moderator role.
 MOD_ROLE_ID = 1513904125086011402
 
+# Administrator role (pinged when a 3rd warning needs a ban decision).
+ADMIN_ROLE_ID = 1513904120803889243
+
+# False = only Administrators/owner can /ban and trigger the automatic 3rd-warning ban.
+# True  = Moderators can too.
+MODS_CAN_BAN = False
+
 # Warning roles / warning system
 WARN_1_ROLE_ID = 1513904153900875897
 WARN_2_ROLE_ID = 1513904154719027291
@@ -80,7 +93,7 @@ WARNING_EXPIRE_DAYS = 30
 # Green WARNING CLEARED cards are posted here.
 WARNING_CLEAR_CHANNEL_ID = 1540154905644367893
 
-# Staff role IDs allowed to use /mute.
+# Staff role IDs (they can only use /warn).
 STAFF_ROLE_IDS = {
     int(x)
     for x in os.environ.get(
@@ -200,45 +213,58 @@ def audit_reason(reason: str, action: str, by: discord.abc.User) -> str:
 # ================================================================
 # PERMISSIONS
 # ================================================================
+# Four levels, worked out from the member's roles:
+#   admin -> server owner, or anyone with the Administrator permission
+#   mod   -> Moderator role (MOD_ROLE_ID) or any role above it
+#   staff -> lowest role in STAFF_ROLE_IDS, or any role above it
+#   none  -> everyone else
 
-def staff_only(permission: str):
-    """Staff role or higher, plus administrators."""
+TIER_RANK = {"none": 0, "staff": 1, "mod": 2, "admin": 3}
+TIER_LABEL = {"staff": "Staff", "mod": "Moderators", "admin": "Administrators"}
+
+# Lowest level allowed to /ban and to trigger the automatic 3rd-warning ban.
+BAN_MIN_TIER = "mod" if MODS_CAN_BAN else "admin"
+
+
+class NotAllowed(app_commands.CheckFailure):
+    """Raised by require_tier. The text is shown to the user."""
+
+
+def actor_tier(member: discord.Member) -> str:
+    guild = member.guild
+
+    if member.id == guild.owner_id or member.guild_permissions.administrator:
+        return "admin"
+
+    mod_role = guild.get_role(MOD_ROLE_ID)
+
+    if mod_role and member.top_role >= mod_role:
+        return "mod"
+
+    staff_roles = [
+        r for r in (guild.get_role(i) for i in STAFF_ROLE_IDS) if r
+    ]
+
+    if staff_roles and member.top_role >= min(staff_roles):
+        return "staff"
+
+    return "none"
+
+
+def can_ban(member: discord.Member) -> bool:
+    return TIER_RANK[actor_tier(member)] >= TIER_RANK[BAN_MIN_TIER]
+
+
+def require_tier(min_tier: str):
+    """Only members of this level (or higher) can use the command."""
 
     async def predicate(interaction: discord.Interaction) -> bool:
-        user = interaction.user
-
-        if user.guild_permissions.administrator:
+        if TIER_RANK[actor_tier(interaction.user)] >= TIER_RANK[min_tier]:
             return True
 
-        staff_roles = [
-            r
-            for r in (interaction.guild.get_role(i) for i in STAFF_ROLE_IDS)
-            if r
-        ]
-
-        if staff_roles and user.top_role >= min(staff_roles):
-            return True
-
-        raise app_commands.MissingPermissions([permission])
-
-    return app_commands.check(predicate)
-
-
-def mod_only(permission: str):
-    """Moderator role or higher, plus administrators."""
-
-    async def predicate(interaction: discord.Interaction) -> bool:
-        user = interaction.user
-
-        if user.guild_permissions.administrator:
-            return True
-
-        mod_role = interaction.guild.get_role(MOD_ROLE_ID)
-
-        if mod_role and user.top_role >= mod_role:
-            return True
-
-        raise app_commands.MissingPermissions([permission])
+        raise NotAllowed(
+            f"This command is for {TIER_LABEL[min_tier]} or higher."
+        )
 
     return app_commands.check(predicate)
 
@@ -258,9 +284,19 @@ def target_problem(
     if bot.user and member.id == bot.user.id:
         return "I can't punish myself."
 
+    # --- protected members: nobody can touch them through the bot ---
     if member.id == guild.owner_id:
         return "You can't punish the server owner."
 
+    if member.guild_permissions.administrator:
+        return "You can't punish an administrator."
+
+    mod_role = guild.get_role(MOD_ROLE_ID)
+
+    if mod_role and member.top_role > mod_role:
+        return "That member is protected (their role is above Moderator)."
+
+    # --- rank rules ---
     if (
         interaction.user.id != guild.owner_id
         and member.top_role >= interaction.user.top_role
@@ -278,6 +314,18 @@ def target_problem(
         )
 
     return None
+
+
+def get_log_channel(interaction: discord.Interaction):
+    """Where the punishment cards are posted."""
+
+    channel = (
+        interaction.guild.get_channel(PUNISHMENT_LOG_CHANNEL_ID)
+        if PUNISHMENT_LOG_CHANNEL_ID
+        else interaction.channel
+    )
+
+    return channel or interaction.channel
 
 
 # ================================================================
@@ -728,14 +776,7 @@ async def issue_punishment(
 
     save_db()
 
-    log_channel = (
-        interaction.guild.get_channel(PUNISHMENT_LOG_CHANNEL_ID)
-        if PUNISHMENT_LOG_CHANNEL_ID
-        else interaction.channel
-    )
-
-    if log_channel is None:
-        log_channel = interaction.channel
+    log_channel = get_log_channel(interaction)
 
     file = discord.File(
         io.BytesIO(card_bytes),
@@ -940,6 +981,7 @@ async def on_ready():
     print(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
     print(f"👮 Staff role IDs: {sorted(STAFF_ROLE_IDS) or 'none set'}")
     print(f"🛡️ Moderator role ID: {MOD_ROLE_ID}")
+    print(f"🔨 Who can ban: {TIER_LABEL[BAN_MIN_TIER]} or higher")
     print(f"⚠️ Warning expiration: {WARNING_EXPIRE_DAYS} days")
     print(f"🟢 Warning cleared channel: {WARNING_CLEAR_CHANNEL_ID}")
 
@@ -972,7 +1014,7 @@ async def on_command_error(
     reason="Why they're being warned"
 )
 @app_commands.guild_only()
-@mod_only("manage_messages")
+@require_tier("staff")
 async def warn_cmd(
     interaction: discord.Interaction,
     member: discord.Member,
@@ -986,26 +1028,25 @@ async def warn_cmd(
     if problem:
         return await reject(interaction, "warn", member, problem)
 
-    # Count active warnings.
+    # Count active warnings (this one included).
     warning_count = active_warning_count(member.id) + 1
 
     percent = warning_percent(warning_count)
 
     issued_at = discord.utils.utcnow().isoformat()
 
-    # Warning 1 / 2 = WARNING card.
-    # Warning 3+ = BAN card.
-    card_type = "BAN" if warning_count >= 3 else "WARNING"
+    # The automatic ban on the 3rd warning only happens when the person
+    # giving the warning is allowed to ban (Administrators by default).
+    auto_ban = warning_count >= 3 and can_ban(interaction.user)
+
+    card_type = "BAN" if auto_ban else "WARNING"
 
     card_reason = reason
 
-    if warning_count >= 3:
+    if auto_ban:
         card_reason = (
             f"{reason} — 3 active warnings reached. Automatic ban applied."
         )[:300]
-
-    # Update warning roles.
-    await update_warning_roles(interaction.guild, member, warning_count)
 
     record_extra = {
         "warning_active": True,
@@ -1014,11 +1055,11 @@ async def warn_cmd(
         "warning_percent": percent,
     }
 
-    if warning_count >= 3:
+    if auto_ban:
         record_extra["automatic_ban"] = True
 
     # WARNING in punishment_card.py has a default severity of 33%.
-    # Temporarily change it to 33 / 66 for warning 1 / warning 2.
+    # Temporarily change it to 33 / 66 / 100 for warning 1 / 2 / 3+.
     # The lock prevents two simultaneous warnings from changing it
     # at the same time.
 
@@ -1042,10 +1083,19 @@ async def warn_cmd(
             TYPE_STYLE["WARNING"] = original_warning_style
 
     if not success:
+        # Nothing was saved, so don't touch the warning roles either.
         return
 
-    # Third warning = automatic ban.
-    if warning_count >= 3:
+    # Update the warning roles only AFTER the warning was really recorded.
+    # Without an automatic ban the member keeps the "Warn 2" role at 3+.
+    await update_warning_roles(
+        interaction.guild,
+        member,
+        warning_count if auto_ban else min(warning_count, 2)
+    )
+
+    # 3rd warning given by an Administrator = automatic ban.
+    if auto_ban:
 
         try:
             await member.ban(
@@ -1083,6 +1133,36 @@ async def warn_cmd(
                 ephemeral=True,
             )
 
+        return
+
+    # 3rd+ warning from Staff / a Moderator: NO ban. Tell the Administrators.
+    if warning_count >= 3:
+
+        admin_role = interaction.guild.get_role(ADMIN_ROLE_ID)
+
+        who = admin_role.mention if admin_role else "Administrators"
+
+        try:
+            await get_log_channel(interaction).send(
+                f"{who} {member.mention} now has "
+                f"**{warning_count}** active warnings. "
+                f"An Administrator needs to decide on a ban.",
+                allowed_mentions=discord.AllowedMentions(
+                    roles=[admin_role] if admin_role else False,
+                    users=False,
+                    everyone=False,
+                ),
+            )
+
+        except discord.HTTPException as e:
+            print(f"⚠️ Couldn't post the 3rd-warning notice: {e}")
+
+        await interaction.followup.send(
+            f"ℹ️ {member.mention} now has **{warning_count}** active warnings. "
+            f"You can't ban, so I pinged the Administrators.",
+            ephemeral=True,
+        )
+
 
 # ================================================================
 # /UNWARN
@@ -1098,7 +1178,7 @@ async def warn_cmd(
     reason="Why the warning is being removed",
 )
 @app_commands.guild_only()
-@mod_only("manage_messages")
+@require_tier("mod")
 async def unwarn_cmd(
     interaction: discord.Interaction,
     member: discord.Member,
@@ -1173,7 +1253,7 @@ async def unwarn_cmd(
     reason="Why they're being muted"
 )
 @app_commands.guild_only()
-@staff_only("moderate_members")
+@require_tier("mod")
 async def mute_cmd(
     interaction: discord.Interaction,
     member: discord.Member,
@@ -1239,7 +1319,7 @@ async def mute_cmd(
     ]
 )
 @app_commands.guild_only()
-@mod_only("moderate_members")
+@require_tier("mod")
 async def timeout_cmd(
     interaction: discord.Interaction,
     member: discord.Member,
@@ -1307,7 +1387,7 @@ async def timeout_cmd(
     reason="Why they're being kicked"
 )
 @app_commands.guild_only()
-@mod_only("kick_members")
+@require_tier("mod")
 async def kick_cmd(
     interaction: discord.Interaction,
     member: discord.Member,
@@ -1357,7 +1437,7 @@ async def kick_cmd(
     reason="Why they're being banned"
 )
 @app_commands.guild_only()
-@mod_only("ban_members")
+@require_tier(BAN_MIN_TIER)
 async def ban_cmd(
     interaction: discord.Interaction,
     member: discord.User,
@@ -1442,6 +1522,9 @@ async def on_app_command_error(
 
     if isinstance(error, app_commands.MissingPermissions):
         msg = f"⚠️ {bold('You do not have permission to do that.')}"
+
+    elif isinstance(error, NotAllowed):
+        msg = f"⚠️ {bold(str(error))}"
 
     elif isinstance(error, app_commands.TransformerError):
         msg = (
