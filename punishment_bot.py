@@ -591,7 +591,13 @@ async def issue_punishment(
     view.add_item(PunishmentDetailsButton(case_no))
 
     try:
-        await send_with_retry(log_channel, file=file, view=view)
+        await send_with_retry(
+            log_channel,
+            content=f"-# Punisher: {interaction.user.mention}",
+            file=file,
+            view=view,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
         print(f"✅ Case ELT-{case_no:04d} ({ptype}/{render_type}) posted for {member} by {interaction.user}")
     except Exception as e:
         print(f"❌ Failed to send punishment card: {e}")
