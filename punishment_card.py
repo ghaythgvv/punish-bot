@@ -20,7 +20,7 @@ TYPE_STYLE = {
 }
 
 # Second line of the card title ("NEW ..."). Anything not listed says PUNISHMENT.
-TITLE_WORD = {"BLACKLIST": "BLACKLIST"}
+TITLE_WORD = {"BLACKLIST": "BLACKLIST", "WARNING CLEARED": "UNWARN"}
 
 WEIGHT_NAMES = {
     "Orbitron": {500: "Medium", 700: "Bold", 800: "ExtraBold", 900: "Black"},
@@ -443,7 +443,7 @@ def render_card(username, punisher, reason, ptype, case_no, date_text, avatar_by
 
     put_text(img, px(300), px(132), "NEW", font("Orbitron", 900, 62), (255, 255, 255, 255), sp=4,
              glow=((181, 107, 255), 32))
-    title_col = tuple(color) if ptype == "BLACKLIST" else (255, 92, 240)
+    title_col = tuple(color)
     put_text(img, px(300), px(172), TITLE_WORD.get(ptype, "PUNISHMENT"), font("Orbitron", 900, 30),
              title_col + (255,), sp=14, glow=(title_col, 14))
 
