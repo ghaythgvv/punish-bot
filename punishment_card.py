@@ -16,7 +16,11 @@ TYPE_STYLE = {
     "TIMEOUT": ((255, 92, 240), 45),
     "KICK": ((255, 77, 109), 78),
     "BAN": ((255, 23, 68), 100),
+    "BLACKLIST": ((226, 230, 240), 100),
 }
+
+# Second line of the card title ("NEW ..."). Anything not listed says PUNISHMENT.
+TITLE_WORD = {"BLACKLIST": "BLACKLIST"}
 
 WEIGHT_NAMES = {
     "Orbitron": {500: "Medium", 700: "Bold", 800: "ExtraBold", 900: "Black"},
@@ -361,10 +365,17 @@ def draw_ornament(img, color):
     put(img, lay, px(cx) - lw // 2, px(cy) - lh // 2)
 
 
+def stamp_size(text: str) -> int:
+    """Long stamp words are drawn smaller so they never run into the title."""
+    n = len(text)
+    return 44 if n <= 8 else 36 if n <= 10 else 26
+
+
 def draw_stamp(img, text, color):
-    f = font("Orbitron", 900, 44)
+    size = stamp_size(text)
+    f = font("Orbitron", 900, size)
     tw = text_w(text, f, 6) / S
-    bw, bh, mg = tw + 44 + 12, 44 * 1.25 + 16 + 12, 40
+    bw, bh, mg = tw + 44 + 12, size * 1.25 + 16 + 12, 40
     lw, lh = px(bw + 2 * mg), px(bh + 2 * mg)
     box = (px(mg), px(mg), px(mg + bw) - 1, px(mg + bh) - 1)
 
@@ -382,7 +393,7 @@ def draw_stamp(img, text, color):
     d.rounded_rectangle(box, px(10), outline=col, width=px(2))
     inner = (box[0] + px(4), box[1] + px(4), box[2] - px(4), box[3] - px(4))
     d.rounded_rectangle(inner, px(6), outline=col, width=px(2))
-    put_text(layer, px(mg + 6 + 22), px(mg + 6 + 8 + 41), text, f, col, sp=6, glow=(color, 14))
+    put_text(layer, px(mg + 6 + 22), px(mg + 6 + 8 + size * 0.93), text, f, col, sp=6, glow=(color, 14))
 
     out = Image.new("RGBA", (lw, lh), (0, 0, 0, 0))
     put(out, sh, 0, 0)
@@ -393,9 +404,11 @@ def draw_stamp(img, text, color):
     put(img, rot, px(cx) - rot.width // 2, px(cy) - rot.height // 2)
 
 
-def render_card(username, punisher, reason, ptype, case_no, date_text, avatar_bytes=None) -> bytes:
+def render_card(username, punisher, reason, ptype, case_no, date_text, avatar_bytes=None, sev=None) -> bytes:
+    """sev overrides the severity bar (used by warnings: 33 / 66 / 100)."""
     ptype = ptype.upper()
-    color, sev = TYPE_STYLE[ptype]
+    color, base_sev = TYPE_STYLE[ptype]
+    sev = base_sev if sev is None else sev
     w, h = W * S, H * S
 
     card_mask = Image.new("L", (w, h), 0)
@@ -430,8 +443,9 @@ def render_card(username, punisher, reason, ptype, case_no, date_text, avatar_by
 
     put_text(img, px(300), px(132), "NEW", font("Orbitron", 900, 62), (255, 255, 255, 255), sp=4,
              glow=((181, 107, 255), 32))
-    put_text(img, px(300), px(172), "PUNISHMENT", font("Orbitron", 900, 30), (255, 92, 240, 255), sp=14,
-             glow=((255, 92, 240), 14))
+    title_col = tuple(color) if ptype == "BLACKLIST" else (255, 92, 240)
+    put_text(img, px(300), px(172), TITLE_WORD.get(ptype, "PUNISHMENT"), font("Orbitron", 900, 30),
+             title_col + (255,), sp=14, glow=(title_col, 14))
 
     draw_avatar(img, avatar_bytes)
     draw_ornament(img, color)
