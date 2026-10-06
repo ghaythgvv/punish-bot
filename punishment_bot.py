@@ -6,15 +6,15 @@ Posts an ANIMATED punishment card (punishment_gif.render_card_gif) with the targ
 name plus a "View Punishment Details" button. Falls back to the still PNG card if needed.
 
 Who can use what:
-    Staff (lowest role in STAFF_ROLE_IDS, or above) -> /warn  /warnings
-    Moderators (MOD_ROLE_ID, or above)              -> + /unwarn /mute /timeout /kick /history
-    Administrators + server owner                   -> everything, including /ban
+    Staff (lowest role in STAFF_ROLE_IDS, or above) -> /warn  /unwarn
+    Moderators (MOD_ROLE_ID, or above)              -> everything: + /warnings /history /mute /timeout /kick /ban
+    Administrators + server owner                   -> everything
 
 Nobody can punish: the server owner, an Administrator, or anyone whose top role is ABOVE the
 Moderator role. And nobody can punish someone whose top role is equal to or above their own.
 
-Bans: only Administrators can /ban and only they trigger the automatic ban on the 3rd warning
-(set MODS_CAN_BAN = True to let Moderators do it too). When Staff / a Moderator gives a 3rd
+Bans: Moderators and Administrators can /ban and trigger the automatic ban on the 3rd warning
+(set MODS_CAN_BAN = False to make it Administrators only). When Staff gives a 3rd
 warning, no ban happens: the Administrators are pinged instead.
 /ban also works on someone who ALREADY LEFT: paste their user ID in the member box.
 
@@ -78,7 +78,7 @@ PUNISHMENT_LOG_CHANNEL_ID = None   # None = post in the channel where the comman
 MOD_ROLE_ID = 1513904125086011402
 ADMIN_ROLE_ID = 1513904120803889243   # pinged when a 3rd warning needs a ban decision
 
-MODS_CAN_BAN = False
+MODS_CAN_BAN = True
 
 WARN_1_ROLE_ID = 1513904153900875897
 WARN_2_ROLE_ID = 1513904154719027291
@@ -817,7 +817,7 @@ async def warn_cmd(interaction: discord.Interaction, member: discord.Member, rea
         f"They clear after {WARNING_EXPIRE_DAYS} days without a new warning.",
     )
 
-    # ---- 3rd+ warning from Staff / a Moderator: no ban, ping the Administrators ----
+    # ---- 3rd+ warning from Staff: no ban, ping the Administrators ----
     if warning_count >= MAX_WARNINGS:
         admin_role = guild.get_role(ADMIN_ROLE_ID)
         who = admin_role.mention if admin_role else "Administrators"
@@ -845,7 +845,7 @@ async def warn_cmd(interaction: discord.Interaction, member: discord.Member, rea
 @bot.tree.command(name="unwarn", description="Remove the most recent active warning from a member.", guild=GUILD)
 @app_commands.describe(member="The member whose latest warning should be removed", reason="Why the warning is being removed")
 @app_commands.guild_only()
-@require_tier("mod")
+@require_tier("staff")
 async def unwarn_cmd(interaction: discord.Interaction, member: discord.Member, reason: app_commands.Range[str, 1, 300]):
     await interaction.response.defer(ephemeral=True)
 
@@ -1031,7 +1031,7 @@ async def ban_cmd(interaction: discord.Interaction, member: discord.User, reason
 @bot.tree.command(name="warnings", description="Show a member's active warnings and when they clear.", guild=GUILD)
 @app_commands.describe(member="The member to check")
 @app_commands.guild_only()
-@require_tier("staff")
+@require_tier("mod")
 async def warnings_cmd(interaction: discord.Interaction, member: discord.User):
     await interaction.response.defer(ephemeral=True)
 
