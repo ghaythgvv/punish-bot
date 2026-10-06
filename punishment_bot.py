@@ -20,16 +20,17 @@ Nobody can punish: the server owner, an Administrator, or anyone whose top role 
 Moderator role. And nobody can punish someone whose top role is equal to or above their own.
 
 /blacklist
-    - Removes ALL roles from the member (except Discord-managed ones like Server Booster) and gives
-      BLACKLIST_ROLE_ID. The removed roles are saved, so /unblacklist can give them back.
-    - Posts a BLACKLIST card with the skull banner.
+    - Removes ALL roles from the member (except the Super Member role and Discord-managed ones like
+      Server Booster) and gives BLACKLIST_ROLE_ID. The removed roles are saved, so /unblacklist can give them back.
+    - Posts a BLACKLIST card with the skull banner (every other card uses the same banner now too).
     - The blacklist is locked: if anyone (or another bot, e.g. verification) gives a blacklisted member
       a role, it is removed again; if they remove the blacklist role, it is put back; if the member
       leaves and rejoins, they get the blacklist role again.
     - Only /unblacklist lifts it.
 
 What's new in v3
-    - /blacklist, /unblacklist, /blacklisted.
+    - /blacklist, /unblacklist, /blacklisted. The Super Member role is never removed by /blacklist.
+    - Every card (warn, unwarn, mute, timeout, kick, ban, blacklist) now uses the skull banner.
     - /kick and /ban are for the high rank only (the "high rank" now also counts the ADMIN_ROLE_ID role,
       not only members with the Administrator permission).
     - Warning severity is passed to the card directly (no more temporary change of the shared style table).
@@ -41,7 +42,8 @@ Requirements:
     pip install discord.py Pillow     (discord.py 2.4 or newer)
 
 Before running:
-    - punishment_card.py, punishment_gif.py, card_bg.gif, blacklist_banner.jpg and the fonts/ folder next to this file.
+    - punishment_card.py, punishment_gif.py, blacklist_banner.jpg and the fonts/ folder next to this file.
+      (card_bg.gif is only used as a backup if the banner picture is missing.)
     - SERVER MEMBERS INTENT enabled in the Developer Portal.
     - Invite with the "bot" and "applications.commands" scopes.
     - DISCORD_TOKEN env variable (Railway Variables). Optional STAFF_ROLE_IDS (comma separated).
@@ -97,7 +99,9 @@ BLACKLIST_MIN_TIER = "admin"       # "admin" = high rank only, "mod" = moderator
 WARN_1_ROLE_ID = 1513904153900875897
 WARN_2_ROLE_ID = 1513904154719027291
 
-BLACKLIST_ROLE_ID = 1554563076681109524   # the only role a blacklisted member keeps
+BLACKLIST_ROLE_ID = 1554563076681109524   # the role a blacklisted member gets
+SUPER_MEMBER_ROLE_ID = 1513904142551220366   # NEVER taken away by /blacklist
+KEEP_ROLE_IDS = {SUPER_MEMBER_ROLE_ID}       # add more role IDs here if /blacklist should leave them alone
 
 WARNING_EXPIRE_DAYS = 30
 MAX_WARNINGS = 3
@@ -685,24 +689,25 @@ async def _wait_ready_for_warning_expiry():
 # BLACKLIST HELPERS
 # ================================================================
 def removable_roles(member: discord.Member):
-    """Roles /blacklist takes away: everything except @everyone, the blacklist role and
-    Discord-managed roles (Server Booster, bot roles) which can't be removed by hand anyway."""
+    """Roles /blacklist takes away: everything except @everyone, the blacklist role, the Super Member
+    role (KEEP_ROLE_IDS) and Discord-managed roles (Server Booster, bot roles) which can't be removed anyway."""
     return [
         r for r in member.roles
-        if not r.is_default() and not r.managed and r.id != BLACKLIST_ROLE_ID
+        if not r.is_default() and not r.managed and r.id != BLACKLIST_ROLE_ID and r.id not in KEEP_ROLE_IDS
     ]
 
 
-def managed_roles(member: discord.Member):
-    return [r for r in member.roles if r.managed]
+def kept_roles(member: discord.Member):
+    """Roles a blacklisted member keeps next to the blacklist role."""
+    return [r for r in member.roles if not r.is_default() and (r.managed or r.id in KEEP_ROLE_IDS)]
 
 
 async def lock_blacklist_roles(member: discord.Member, reason: str):
-    """Makes the member's roles exactly: blacklist role (+ managed roles that can't be removed)."""
+    """Makes the member's roles exactly: blacklist role + the roles they keep (Super Member, managed roles)."""
     role = member.guild.get_role(BLACKLIST_ROLE_ID)
     if role is None:
         raise RuntimeError("blacklist role not found")
-    await member.edit(roles=managed_roles(member) + [role], reason=reason[:512])
+    await member.edit(roles=kept_roles(member) + [role], reason=reason[:512])
 
 
 # ================================================================
@@ -801,7 +806,10 @@ async def on_member_update(before: discord.Member, after: discord.Member):
     role = after.guild.get_role(BLACKLIST_ROLE_ID)
     if role is None:
         return
-    extras = [r for r in after.roles if not r.is_default() and not r.managed and r.id != role.id]
+    extras = [
+        r for r in after.roles
+        if not r.is_default() and not r.managed and r.id != role.id and r.id not in KEEP_ROLE_IDS
+    ]
     if not extras and role in after.roles:
         return   # already exactly right (this is also what our own edit looks like)
 
@@ -1213,7 +1221,7 @@ async def unblacklist_cmd(interaction: discord.Interaction, member: discord.User
                 if r and not r.is_default() and not r.managed and (me_top is None or r < me_top)
             ]
             try:
-                await target.edit(roles=managed_roles(target) + restore,
+                await target.edit(roles=kept_roles(target) + restore,
                                   reason=audit_reason(reason, "unblacklisted", interaction.user))
                 restored = len(restore)
             except discord.HTTPException as e:
