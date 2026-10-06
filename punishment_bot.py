@@ -1,44 +1,53 @@
 """
-ELT Punishment Bot  (v2)
+ELT Punishment Bot  (v3)
 =======================================
-Slash commands: /warn /unwarn /mute /timeout /kick /ban  +  /warnings /history
+Slash commands: /warn /unwarn /mute /timeout /kick /ban /blacklist /unblacklist
+                +  /warnings /history /blacklisted
 Posts an ANIMATED punishment card (punishment_gif.render_card_gif) with the target's avatar and
 name plus a "View Punishment Details" button. Falls back to the still PNG card if needed.
+/blacklist cards use the skull banner (blacklist_banner.jpg) as their background.
 
 Who can use what:
     Staff (lowest role in STAFF_ROLE_IDS, or above) -> /warn  /unwarn
-    Moderators (MOD_ROLE_ID, or above)              -> everything: + /warnings /history /mute /timeout /kick /ban
-    Administrators + server owner                   -> everything
+    Moderators (MOD_ROLE_ID, or above)              -> + /warnings /history /blacklisted /mute /timeout
+    HIGH RANK (ADMIN_ROLE_ID or above, Administrators, server owner)
+                                                    -> everything: + /kick /ban /blacklist /unblacklist
+
+Moderators can NOT kick or ban (MODS_CAN_KICK / MODS_CAN_BAN = False). Only the high rank can.
+When a Moderator or Staff gives a 3rd warning, no ban happens: the high rank is pinged instead.
 
 Nobody can punish: the server owner, an Administrator, or anyone whose top role is ABOVE the
 Moderator role. And nobody can punish someone whose top role is equal to or above their own.
 
-Bans: Moderators and Administrators can /ban and trigger the automatic ban on the 3rd warning
-(set MODS_CAN_BAN = False to make it Administrators only). When Staff gives a 3rd
-warning, no ban happens: the Administrators are pinged instead.
-/ban also works on someone who ALREADY LEFT: paste their user ID in the member box.
+/blacklist
+    - Removes ALL roles from the member (except Discord-managed ones like Server Booster) and gives
+      BLACKLIST_ROLE_ID. The removed roles are saved, so /unblacklist can give them back.
+    - Posts a BLACKLIST card with the skull banner.
+    - The blacklist is locked: if anyone (or another bot, e.g. verification) gives a blacklisted member
+      a role, it is removed again; if they remove the blacklist role, it is put back; if the member
+      leaves and rejoins, they get the blacklist role again.
+    - Only /unblacklist lifts it.
 
-What's new in v2
-    - Warnings are counted under a lock, so two staff warning the same person at the same moment
-      can no longer skip the 3rd warning.
-    - The case database is crash-safe: a corrupt file is never overwritten (it is copied aside and the
-      .bak backup is used), and the case counter can never go backwards.
-    - The hourly expiry loop can no longer die silently; members who left have their expired
-      warnings cleared quietly.
-    - Members who leave and rejoin get their Warn role back.
-    - The punished member gets a DM (kick/ban DMs are removed again if the action fails).
-    - New: /warnings (active warnings + when they clear) and /history (all cases of a member).
+What's new in v3
+    - /blacklist, /unblacklist, /blacklisted.
+    - /kick and /ban are for the high rank only (the "high rank" now also counts the ADMIN_ROLE_ID role,
+      not only members with the Administrator permission).
+    - Warning severity is passed to the card directly (no more temporary change of the shared style table).
+    - Longer stamps (BLACKLIST, WARNING CLEARED) are drawn smaller so they don't run into the title.
+    - Fixed: a very dark card background could turn black pixels see-through in the GIF.
+    - Fixed: the animated background was decoded again on every card (cache is bigger now).
 
 Requirements:
     pip install discord.py Pillow     (discord.py 2.4 or newer)
 
 Before running:
-    - punishment_card.py, punishment_gif.py, card_bg.gif and the fonts/ folder next to this file.
+    - punishment_card.py, punishment_gif.py, card_bg.gif, blacklist_banner.jpg and the fonts/ folder next to this file.
     - SERVER MEMBERS INTENT enabled in the Developer Portal.
     - Invite with the "bot" and "applications.commands" scopes.
     - DISCORD_TOKEN env variable (Railway Variables). Optional STAFF_ROLE_IDS (comma separated).
-    - The bot's role must sit ABOVE anyone you want to mute/timeout/kick/ban and above the Warn roles.
-    - Railway: add a Volume mounted at /data so cases survive redeploys.
+    - The bot's role must sit ABOVE anyone you want to punish, above the Warn roles and above the Blacklist role.
+    - The bot needs Manage Roles, Moderate Members, Kick Members and Ban Members.
+    - Railway: add a Volume mounted at /data so cases and the blacklist survive redeploys.
     - This bot needs its OWN Discord application + token (shared tokens overwrite each other's commands).
 
 If the slash commands ever disappear: an admin mentions the bot and types "sync".
@@ -59,13 +68,15 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from punishment_card import render_card, TYPE_STYLE
-from punishment_gif import render_card_gif, clean_for_card, MAX_BYTES
+from punishment_gif import render_card_gif, clean_for_card, MAX_BYTES, BANNER_PATH
 
 # Own style for the green "warning cleared" card.
 TYPE_STYLE.setdefault("WARNING CLEARED", ((70, 220, 120), 100))
 
 # Serialises every /warn: counting, card style, saving and roles happen one warn at a time.
 warning_lock = asyncio.Lock()
+# Serialises /blacklist and /unblacklist.
+blacklist_lock = asyncio.Lock()
 
 # =========================== CONFIG ===========================
 TOKEN = os.environ.get("DISCORD_TOKEN")
@@ -76,12 +87,17 @@ GUILD = discord.Object(id=GUILD_ID)
 PUNISHMENT_LOG_CHANNEL_ID = None   # None = post in the channel where the command was used
 
 MOD_ROLE_ID = 1513904125086011402
-ADMIN_ROLE_ID = 1513904120803889243   # pinged when a 3rd warning needs a ban decision
+ADMIN_ROLE_ID = 1513904120803889243   # the HIGH RANK role: can kick / ban / blacklist, pinged on a 3rd warning
 
-MODS_CAN_BAN = True
+# Who may use the heavy commands. False = high rank only.
+MODS_CAN_BAN = False
+MODS_CAN_KICK = False
+BLACKLIST_MIN_TIER = "admin"       # "admin" = high rank only, "mod" = moderators too
 
 WARN_1_ROLE_ID = 1513904153900875897
 WARN_2_ROLE_ID = 1513904154719027291
+
+BLACKLIST_ROLE_ID = 1554563076681109524   # the only role a blacklisted member keeps
 
 WARNING_EXPIRE_DAYS = 30
 MAX_WARNINGS = 3
@@ -145,17 +161,18 @@ def _read_db_file(path: str):
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
     records = {int(k): v for k, v in data.get("records", {}).items()}
-    return int(data.get("counter", 0)), records
+    blacklist = {int(k): v for k, v in data.get("blacklist", {}).items()}
+    return int(data.get("counter", 0)), records, blacklist
 
 
 def load_db():
     """Reads the database. A corrupt file is copied aside (never overwritten) and the backup is tried."""
     for path in (DB_PATH, DB_PATH + ".bak"):
         try:
-            counter, records = _read_db_file(path)
+            counter, records, blacklist = _read_db_file(path)
             if path != DB_PATH:
                 print(f"♻️ Restored the case database from {path}")
-            return max(counter, max(records) if records else 0), records
+            return max(counter, max(records) if records else 0), records, blacklist
         except FileNotFoundError:
             continue
         except Exception as e:
@@ -165,7 +182,7 @@ def load_db():
                 print(f"📦 Kept a copy of the unreadable file as {path}.corrupt-*")
             except Exception:
                 pass
-    return 0, {}
+    return 0, {}, {}
 
 
 def save_db():
@@ -173,7 +190,10 @@ def save_db():
         os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
         tmp = DB_PATH + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"counter": case_counter, "records": punishment_records}, f, ensure_ascii=False)
+            json.dump(
+                {"counter": case_counter, "records": punishment_records, "blacklist": blacklist_records},
+                f, ensure_ascii=False,
+            )
         if os.path.exists(DB_PATH):
             try:
                 shutil.copyfile(DB_PATH, DB_PATH + ".bak")
@@ -184,8 +204,9 @@ def save_db():
         print(f"❌ Couldn't save {DB_PATH}: {e}")
 
 
-case_counter, punishment_records = load_db()
-print(f"📁 Case data: {DB_PATH} (last case #{case_counter:04d}, {len(punishment_records)} saved)")
+case_counter, punishment_records, blacklist_records = load_db()
+print(f"📁 Case data: {DB_PATH} (last case #{case_counter:04d}, {len(punishment_records)} saved, "
+      f"{len(blacklist_records)} blacklisted)")
 
 
 def next_case() -> int:
@@ -207,8 +228,9 @@ def audit_reason(reason: str, action: str, by: discord.abc.User) -> str:
 # PERMISSIONS
 # ================================================================
 TIER_RANK = {"none": 0, "staff": 1, "mod": 2, "admin": 3}
-TIER_LABEL = {"staff": "Staff", "mod": "Moderators", "admin": "Administrators"}
+TIER_LABEL = {"staff": "Staff", "mod": "Moderators", "admin": "the high rank"}
 BAN_MIN_TIER = "mod" if MODS_CAN_BAN else "admin"
+KICK_MIN_TIER = "mod" if MODS_CAN_KICK else "admin"
 
 
 class NotAllowed(app_commands.CheckFailure):
@@ -218,6 +240,10 @@ class NotAllowed(app_commands.CheckFailure):
 def actor_tier(member: discord.Member) -> str:
     guild = member.guild
     if member.id == guild.owner_id or member.guild_permissions.administrator:
+        return "admin"
+    # the high-rank ROLE counts too (it may not have the Administrator permission)
+    admin_role = guild.get_role(ADMIN_ROLE_ID)
+    if admin_role and member.top_role >= admin_role:
         return "admin"
     mod_role = guild.get_role(MOD_ROLE_ID)
     if mod_role and member.top_role >= mod_role:
@@ -395,6 +421,10 @@ def warning_percent(count: int) -> int:
 
 async def update_warning_roles(guild: discord.Guild, member: discord.Member, count: int):
     """1 warning: Warn 1 | 2 warnings: Warn 2 | 0 or 3+: none."""
+    # A blacklisted member keeps only the blacklist role.
+    if member.id in blacklist_records:
+        return
+
     warn1 = guild.get_role(WARN_1_ROLE_ID)
     warn2 = guild.get_role(WARN_2_ROLE_ID)
     if warn1 is None or warn2 is None:
@@ -495,11 +525,13 @@ async def issue_punishment(
     card_ptype: str = None,
     record_extra: dict = None,
     confirm_note: str = "",
+    severity: int = None,
 ):
     """
     Renders + posts the card and saves the case.
     Returns the case number on success, or None if it failed.
     card_ptype lets a 3rd warning DISPLAY as BAN while the record stays WARNING.
+    severity overrides the card's severity bar (warnings: 33 / 66 / 100).
     """
     case_no = next_case()
     render_type = (card_ptype or ptype).upper()
@@ -517,7 +549,7 @@ async def issue_punishment(
     try:
         card_bytes = await asyncio.to_thread(
             render_card_gif, user_name, punisher_name, reason, render_type,
-            case_no, date_text, avatar_bytes, max_bytes,
+            case_no, date_text, avatar_bytes, max_bytes, severity,
         )
         ext = "gif"
     except Exception as e:
@@ -525,7 +557,7 @@ async def issue_punishment(
         try:
             card_bytes = await asyncio.to_thread(
                 render_card, user_name, punisher_name, reason, render_type,
-                case_no, date_text, avatar_bytes,
+                case_no, date_text, avatar_bytes, severity,
             )
             ext = "png"
         except Exception as e2:
@@ -650,6 +682,30 @@ async def _wait_ready_for_warning_expiry():
 
 
 # ================================================================
+# BLACKLIST HELPERS
+# ================================================================
+def removable_roles(member: discord.Member):
+    """Roles /blacklist takes away: everything except @everyone, the blacklist role and
+    Discord-managed roles (Server Booster, bot roles) which can't be removed by hand anyway."""
+    return [
+        r for r in member.roles
+        if not r.is_default() and not r.managed and r.id != BLACKLIST_ROLE_ID
+    ]
+
+
+def managed_roles(member: discord.Member):
+    return [r for r in member.roles if r.managed]
+
+
+async def lock_blacklist_roles(member: discord.Member, reason: str):
+    """Makes the member's roles exactly: blacklist role (+ managed roles that can't be removed)."""
+    role = member.guild.get_role(BLACKLIST_ROLE_ID)
+    if role is None:
+        raise RuntimeError("blacklist role not found")
+    await member.edit(roles=managed_roles(member) + [role], reason=reason[:512])
+
+
+# ================================================================
 # SLASH COMMAND SYNC
 # ================================================================
 async def sync_commands() -> bool:
@@ -697,9 +753,10 @@ async def on_ready():
     print(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
     print(f"👮 Staff role IDs: {sorted(STAFF_ROLE_IDS) or 'none set'}")
     print(f"🛡️ Moderator role ID: {MOD_ROLE_ID}")
-    print(f"🔨 Who can ban: {TIER_LABEL[BAN_MIN_TIER]} or higher")
+    print(f"🔨 Who can ban: {TIER_LABEL[BAN_MIN_TIER]} | kick: {TIER_LABEL[KICK_MIN_TIER]} | blacklist: {TIER_LABEL[BLACKLIST_MIN_TIER]}")
     print(f"⚠️ Warning expiration: {WARNING_EXPIRE_DAYS} days")
     print(f"🟢 Warning cleared channel: {WARNING_CLEAR_CHANNEL_ID}")
+    print(f"💀 Blacklist banner: {'found' if os.path.exists(BANNER_PATH) else 'NOT FOUND at ' + BANNER_PATH}")
 
     guild = bot.get_guild(GUILD_ID)
     if guild is not None:
@@ -707,16 +764,54 @@ async def on_ready():
             print("⚠️ Warn 1 / Warn 2 role not found — check the role IDs")
         if guild.get_channel(WARNING_CLEAR_CHANNEL_ID) is None:
             print("⚠️ WARNING_CLEAR_CHANNEL_ID channel not found")
+        blk = guild.get_role(BLACKLIST_ROLE_ID)
+        if blk is None:
+            print("⚠️ Blacklist role not found — check BLACKLIST_ROLE_ID")
+        elif guild.me and blk >= guild.me.top_role:
+            print("⚠️ The Blacklist role is ABOVE my role — move my role higher or /blacklist will fail")
 
 
 @bot.event
 async def on_member_join(member: discord.Member):
-    """Leaving and rejoining doesn't wash warnings away: the Warn role comes back."""
+    """Leaving and rejoining doesn't wash anything away: Blacklist / Warn roles come back."""
     if member.guild.id != GUILD_ID:
         return
+
+    if member.id in blacklist_records:
+        try:
+            await lock_blacklist_roles(member, "Blacklisted member rejoined")
+            print(f"💀 Blacklist role re-applied to {member} after rejoining")
+        except Exception as e:
+            print(f"❌ Couldn't re-apply the blacklist role to {member}: {e}")
+        return
+
     count = active_warning_count(member.id)
     if count:
         await update_warning_roles(member.guild, member, min(count, MAX_WARNINGS - 1))
+
+
+@bot.event
+async def on_member_update(before: discord.Member, after: discord.Member):
+    """Blacklist lock: a blacklisted member keeps ONLY the blacklist role."""
+    if after.guild.id != GUILD_ID or after.id not in blacklist_records:
+        return
+    if before.roles == after.roles:
+        return
+
+    role = after.guild.get_role(BLACKLIST_ROLE_ID)
+    if role is None:
+        return
+    extras = [r for r in after.roles if not r.is_default() and not r.managed and r.id != role.id]
+    if not extras and role in after.roles:
+        return   # already exactly right (this is also what our own edit looks like)
+
+    try:
+        await lock_blacklist_roles(after, "Blacklisted: roles are locked")
+        print(f"💀 Blacklist lock: reset the roles of {after}")
+    except discord.HTTPException as e:
+        print(f"❌ Blacklist lock failed for {after}: {e}")
+    except Exception as e:
+        print(f"❌ Blacklist lock error for {after}: {e}")
 
 
 @bot.event
@@ -743,6 +838,8 @@ async def warn_cmd(interaction: discord.Interaction, member: discord.Member, rea
     problem = target_problem(interaction, member, needs_bot_rank=False)
     if problem:
         return await reject(interaction, "warn", member, problem)
+    if member.id in blacklist_records:
+        return await reject(interaction, "warn", member, "That member is already blacklisted.")
 
     guild = interaction.guild
 
@@ -766,18 +863,13 @@ async def warn_cmd(interaction: discord.Interaction, member: discord.Member, rea
         if auto_ban:
             record_extra["automatic_ban"] = True
 
-        # The card renderer reads the severity from TYPE_STYLE["WARNING"]: set it for this card only.
-        original_style = TYPE_STYLE["WARNING"]
-        TYPE_STYLE["WARNING"] = (original_style[0], percent)
-        try:
-            case_no = await issue_punishment(
-                interaction, member, "WARNING", card_reason,
-                card_ptype=card_type,
-                record_extra=record_extra,
-                confirm_note="" if auto_ban else f"{bold('Active warnings:')} **{warning_count}/{MAX_WARNINGS}**.",
-            )
-        finally:
-            TYPE_STYLE["WARNING"] = original_style
+        case_no = await issue_punishment(
+            interaction, member, "WARNING", card_reason,
+            card_ptype=card_type,
+            record_extra=record_extra,
+            confirm_note="" if auto_ban else f"{bold('Active warnings:')} **{warning_count}/{MAX_WARNINGS}**.",
+            severity=None if auto_ban else percent,   # a BAN card keeps its own 100% bar
+        )
 
         if case_no is None:
             # Card failed before anything was saved: no record, so don't touch the roles.
@@ -817,14 +909,14 @@ async def warn_cmd(interaction: discord.Interaction, member: discord.Member, rea
         f"They clear after {WARNING_EXPIRE_DAYS} days without a new warning.",
     )
 
-    # ---- 3rd+ warning from Staff: no ban, ping the Administrators ----
+    # ---- 3rd+ warning from someone who can't ban: no ban, ping the high rank ----
     if warning_count >= MAX_WARNINGS:
         admin_role = guild.get_role(ADMIN_ROLE_ID)
-        who = admin_role.mention if admin_role else "Administrators"
+        who = admin_role.mention if admin_role else "High rank"
         try:
             await get_log_channel(interaction).send(
                 f"{who} {member.mention} now has **{warning_count}** active warnings. "
-                f"An Administrator needs to decide on a ban.",
+                f"The high rank needs to decide on a ban.",
                 allowed_mentions=discord.AllowedMentions(
                     roles=[admin_role] if admin_role else False, users=False, everyone=False
                 ),
@@ -834,7 +926,7 @@ async def warn_cmd(interaction: discord.Interaction, member: discord.Member, rea
 
         await interaction.followup.send(
             f"ℹ️ {member.mention} now has **{warning_count}** active warnings. "
-            f"You can't ban, so I pinged the Administrators.",
+            f"You can't ban, so I pinged the high rank.",
             ephemeral=True,
         )
 
@@ -954,12 +1046,12 @@ async def timeout_cmd(
 
 
 # ================================================================
-# /KICK
+# /KICK  (high rank only)
 # ================================================================
-@bot.tree.command(name="kick", description="Kick a member and log a kick card.", guild=GUILD)
+@bot.tree.command(name="kick", description="Kick a member and log a kick card. High rank only.", guild=GUILD)
 @app_commands.describe(member="The member being kicked", reason="Why they're being kicked")
 @app_commands.guild_only()
-@require_tier("mod")
+@require_tier(KICK_MIN_TIER)
 async def kick_cmd(interaction: discord.Interaction, member: discord.Member, reason: app_commands.Range[str, 1, 300]):
     await interaction.response.defer(ephemeral=True)
 
@@ -984,9 +1076,9 @@ async def kick_cmd(interaction: discord.Interaction, member: discord.Member, rea
 
 
 # ================================================================
-# /BAN  (also works on someone who already left the server)
+# /BAN  (high rank only; also works on someone who already left the server)
 # ================================================================
-@bot.tree.command(name="ban", description="Ban a member and log a ban card.", guild=GUILD)
+@bot.tree.command(name="ban", description="Ban a member and log a ban card. High rank only.", guild=GUILD)
 @app_commands.describe(member="Who to ban (can be someone who already left: paste their user ID)", reason="Why they're being banned")
 @app_commands.guild_only()
 @require_tier(BAN_MIN_TIER)
@@ -1023,6 +1115,164 @@ async def ban_cmd(interaction: discord.Interaction, member: discord.User, reason
         return await interaction.followup.send(f"⚠️ {bold('Failed to ban:')} {e}", ephemeral=True)
 
     await issue_punishment(interaction, member, "BAN", reason)
+
+
+# ================================================================
+# /BLACKLIST  and  /UNBLACKLIST  (high rank only)
+# ================================================================
+@bot.tree.command(
+    name="blacklist",
+    description="Blacklist a member: remove ALL their roles and give them the blacklist role. High rank only.",
+    guild=GUILD,
+)
+@app_commands.describe(member="The member being blacklisted", reason="Why they're being blacklisted")
+@app_commands.guild_only()
+@require_tier(BLACKLIST_MIN_TIER)
+async def blacklist_cmd(interaction: discord.Interaction, member: discord.Member, reason: app_commands.Range[str, 1, 300]):
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+
+    problem = target_problem(interaction, member)
+    if problem:
+        return await reject(interaction, "blacklist", member, problem)
+
+    role = guild.get_role(BLACKLIST_ROLE_ID)
+    if role is None:
+        return await reject(interaction, "blacklist", member, "The blacklist role was not found — check BLACKLIST_ROLE_ID.")
+    if guild.me and role >= guild.me.top_role:
+        return await reject(interaction, "blacklist", member, "The blacklist role is above mine — move my role higher.")
+
+    async with blacklist_lock:
+        if member.id in blacklist_records:
+            return await reject(interaction, "blacklist", member, "That member is already blacklisted.")
+
+        removed = [r.id for r in removable_roles(member)]
+        try:
+            await lock_blacklist_roles(member, audit_reason(reason, "blacklisted", interaction.user))
+        except discord.Forbidden:
+            return await reject(interaction, "blacklist", member,
+                                "I do not have permission to change that member's roles (check Manage Roles and my role position).")
+        except discord.HTTPException as e:
+            print(f"❌ /blacklist HTTPException for {member}: {e}")
+            return await interaction.followup.send(f"⚠️ {bold('Failed to blacklist:')} {e}", ephemeral=True)
+
+        blacklist_records[member.id] = {
+            "roles": removed,
+            "reason": reason,
+            "by": interaction.user.id,
+            "by_tag": str(interaction.user),
+            "date_text": discord.utils.utcnow().strftime("%d/%m/%Y"),
+        }
+        save_db()
+        print(f"💀 {member} blacklisted by {interaction.user} ({len(removed)} roles removed)")
+
+    await dm_member(
+        member, guild, f"You were blacklisted in {guild.name}", reason, 0x2B2D31,
+        "All your roles were removed. Only the high rank can lift this.",
+    )
+
+    case_no = await issue_punishment(
+        interaction, member, "BLACKLIST", reason,
+        record_extra={"removed_roles": removed},
+        confirm_note=f"{bold('Roles removed:')} **{len(removed)}**.",
+    )
+    if case_no is not None and member.id in blacklist_records:
+        blacklist_records[member.id]["case"] = case_no
+        save_db()
+
+
+@bot.tree.command(
+    name="unblacklist",
+    description="Lift a blacklist and give the member their old roles back. High rank only.",
+    guild=GUILD,
+)
+@app_commands.describe(member="The member to un-blacklist (also works if they left: paste their user ID)", reason="Why the blacklist is lifted")
+@app_commands.guild_only()
+@require_tier(BLACKLIST_MIN_TIER)
+async def unblacklist_cmd(interaction: discord.Interaction, member: discord.User, reason: app_commands.Range[str, 1, 300]):
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+
+    async with blacklist_lock:
+        entry = blacklist_records.get(member.id)
+        if entry is None:
+            return await interaction.followup.send(f"ℹ️ {member.mention} is not blacklisted.", ephemeral=True)
+
+        target = guild.get_member(member.id)
+
+        # The record goes FIRST, otherwise the blacklist lock would strip the restored roles again.
+        del blacklist_records[member.id]
+        save_db()
+
+        restored = 0
+        if target is not None:
+            me_top = guild.me.top_role if guild.me else None
+            old_roles = [guild.get_role(i) for i in entry.get("roles", [])]
+            restore = [
+                r for r in old_roles
+                if r and not r.is_default() and not r.managed and (me_top is None or r < me_top)
+            ]
+            try:
+                await target.edit(roles=managed_roles(target) + restore,
+                                  reason=audit_reason(reason, "unblacklisted", interaction.user))
+                restored = len(restore)
+            except discord.HTTPException as e:
+                blacklist_records[member.id] = entry   # put it back: nothing changed
+                save_db()
+                print(f"❌ /unblacklist failed for {member}: {e}")
+                return await interaction.followup.send(
+                    f"⚠️ {bold('Failed to give the roles back:')} {e}", ephemeral=True)
+
+            await update_warning_roles(guild, target, min(active_warning_count(target.id), MAX_WARNINGS - 1))
+
+    print(f"💀 {member} un-blacklisted by {interaction.user} ({restored} roles restored)")
+
+    if target is not None:
+        await dm_member(
+            target, guild, f"Your blacklist in {guild.name} was lifted", reason, 0x57F287,
+            "Your roles were given back.",
+        )
+
+    embed = discord.Embed(
+        title=bold("Blacklist removed"),
+        description=f"{member.mention} was removed from the blacklist by {interaction.user.mention}.",
+        color=discord.Color.green(),
+        timestamp=discord.utils.utcnow(),
+    )
+    embed.add_field(name=bold("Reason"), value=short(reason, 300), inline=False)
+    if target is not None:
+        embed.add_field(name=bold("Roles restored"), value=str(restored), inline=True)
+    embed.set_thumbnail(url=member.display_avatar.url)
+    try:
+        await get_log_channel(interaction).send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+    except discord.HTTPException as e:
+        print(f"⚠️ Couldn't post the blacklist-removed notice: {e}")
+
+    note = f"{restored} roles restored." if target is not None else "They are not in the server, so no roles were given."
+    await interaction.followup.send(f"🟢 {member.mention} is no longer blacklisted. {note}", ephemeral=True)
+
+
+@bot.tree.command(name="blacklisted", description="Show everyone who is currently blacklisted.", guild=GUILD)
+@app_commands.guild_only()
+@require_tier("mod")
+async def blacklisted_cmd(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+
+    if not blacklist_records:
+        return await interaction.followup.send("ℹ️ Nobody is blacklisted.", ephemeral=True)
+
+    rows = sorted(blacklist_records.items(), key=lambda kv: kv[1].get("case", 0), reverse=True)
+    lines = [
+        f"<@{uid}> • {e.get('date_text', '?')} • by <@{e.get('by', 0)}>\n{short(e.get('reason', ''), 120)}"
+        for uid, e in rows[:15]
+    ]
+    embed = discord.Embed(
+        title=bold("Blacklisted members"),
+        description="\n\n".join(lines)[:4000],
+        color=discord.Color.dark_grey(),
+    )
+    embed.set_footer(text=f"Showing {min(len(rows), 15)} of {len(rows)}")
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 # ================================================================
