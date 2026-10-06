@@ -5,13 +5,13 @@ render_card_gif(...) returns GIF bytes: the same ELT punishment card as
 punishment_card.py, drawn on top of an animated background (card_bg.gif),
 plus a light-sweep and a blinking "recording" dot.
 
-BLACKLIST cards use the skull banner (blacklist_banner.jpg) as their background
-instead of card_bg.gif.
+EVERY card uses the skull banner (blacklist_banner.jpg) as its background. card_bg.gif is only
+a backup that is used if the banner picture is missing.
 
 It reuses the drawing helpers from punishment_card.py, so keep both files in
 the same folder, together with:
-    card_bg.gif            the animated background
-    blacklist_banner.jpg   the skull banner used by /blacklist cards
+    blacklist_banner.jpg   the skull banner used by every card
+    card_bg.gif            backup background (only used if the banner is missing)
     fonts/                 Orbitron + Rajdhani (see punishment_card.py)
 """
 
@@ -177,7 +177,7 @@ def _build_overlay(username, punisher, reason, ptype, case_no, date_text, avatar
     # title
     put_text(img, px(300), px(132), "NEW", font("Orbitron", 900, 62), (255, 255, 255, 255), sp=4,
              glow=((181, 107, 255), 32))
-    title_col = tuple(color) if ptype == "BLACKLIST" else (255, 92, 240)
+    title_col = tuple(color)
     put_text(img, px(300), px(172), TITLE_WORD.get(ptype, "PUNISHMENT"), font("Orbitron", 900, 30),
              title_col + (255,), sp=14, glow=(title_col, 14))
 
@@ -302,24 +302,23 @@ def render_card_gif(username, punisher, reason, ptype, case_no, date_text,
                     avatar_bytes=None, max_bytes=MAX_BYTES, sev=None) -> bytes:
     """Same arguments as punishment_card.render_card, but returns an animated GIF.
     sev overrides the severity bar (warnings use 33 / 66 / 100).
-    Raises FileNotFoundError if card_bg.gif is missing (the bot then falls back to the PNG card)."""
+    Raises FileNotFoundError if both the banner and card_bg.gif are missing (the bot then falls back to the PNG card)."""
     ptype = ptype.upper()
     username, punisher = clean_for_card(username) or "Unknown", clean_for_card(punisher) or "Unknown"
     reason = clean_for_card(reason) or "-"
 
     brightness = BG_BRIGHTNESS
     use_banner = False
-    if ptype == "BLACKLIST" and os.path.exists(BANNER_PATH):
+    if os.path.exists(BANNER_PATH):
         bg_frames, durations = _load_banner(BANNER_PATH)
         brightness = BANNER_BRIGHTNESS
         use_banner = True
     else:
-        if ptype == "BLACKLIST":
-            print(f"⚠️ Blacklist banner not found at {BANNER_PATH} - using the normal card background.")
+        print(f"⚠️ Card banner not found at {BANNER_PATH} - using the normal card background.")
         bg_frames, durations = _load_bg(BG_PATH)
 
     overlay, tag_left = _build_overlay(username, punisher, reason, ptype, case_no, date_text, avatar_bytes, sev, use_banner)
-    dot_color = tuple(TYPE_STYLE[ptype][0]) if ptype == "BLACKLIST" else (255, 92, 240)
+    dot_color = tuple(TYPE_STYLE[ptype][0])
 
     data = b""
     for scale in SCALES:
