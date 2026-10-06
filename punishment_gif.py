@@ -5,10 +5,14 @@ render_card_gif(...) returns GIF bytes: the same ELT punishment card as
 punishment_card.py, drawn on top of an animated background (card_bg.gif),
 plus a light-sweep and a blinking "recording" dot.
 
+BLACKLIST cards use the skull banner (blacklist_banner.jpg) as their background
+instead of card_bg.gif.
+
 It reuses the drawing helpers from punishment_card.py, so keep both files in
 the same folder, together with:
-    card_bg.gif        the animated background
-    fonts/             Orbitron + Rajdhani (see punishment_card.py)
+    card_bg.gif            the animated background
+    blacklist_banner.jpg   the skull banner used by /blacklist cards
+    fonts/                 Orbitron + Rajdhani (see punishment_card.py)
 """
 
 import io
@@ -18,17 +22,21 @@ from functools import lru_cache
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageOps, ImageSequence
 
 from punishment_card import (
-    FONT_DIR, H, RES, S, TYPE_STYLE, W, WEIGHT_NAMES,
+    FONT_DIR, H, RES, S, TITLE_WORD, TYPE_STYLE, W, WEIGHT_NAMES,
     draw_avatar, draw_bar, draw_fields, draw_ornament, draw_stamp, has_duration,
     font, lin_grad, put, put_text, px, text_w,
 )
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BG_PATH = os.environ.get("CARD_BG_PATH") or os.path.join(HERE, "card_bg.gif")
+BANNER_PATH = os.environ.get("BLACKLIST_BANNER_PATH") or os.path.join(HERE, "blacklist_banner.jpg")
 
 MAX_BYTES = 7_500_000            # stay well under Discord's 10 MB upload limit
 SCALES = (1.0, 0.85, 0.7, 0.6)   # if the GIF is too big, retry smaller
 BG_BRIGHTNESS = 0.62             # 1.0 = untouched background, lower = darker (more readable text)
+BANNER_BRIGHTNESS = 0.95         # the skull banner is already dark, so keep it bright
+BANNER_FRAMES = 24               # the banner is a still picture: it is repeated for the sweep / blink animation
+BANNER_FRAME_MS = 80
 TRANSPARENT = 255                # palette slot reserved for the rounded corners
 
 
@@ -74,7 +82,9 @@ def clean_for_card(text: str) -> str:
 
 
 # ------------------------------ background ------------------------------
-@lru_cache(maxsize=1)
+# maxsize 4: the normal background and the skull banner can both stay cached
+# (with 1 they would evict each other and the big GIF was decoded again every time).
+@lru_cache(maxsize=4)
 def _load_bg(path: str):
     im = Image.open(path)
     frames, durations = [], []
@@ -84,9 +94,15 @@ def _load_bg(path: str):
     return tuple(frames), tuple(durations)
 
 
-def _prep_bg(frame: Image.Image, size) -> Image.Image:
+@lru_cache(maxsize=2)
+def _load_banner(path: str):
+    im = Image.open(path).convert("RGB")
+    return (im,) * BANNER_FRAMES, (BANNER_FRAME_MS,) * BANNER_FRAMES
+
+
+def _prep_bg(frame: Image.Image, size, brightness: float) -> Image.Image:
     f = ImageOps.fit(frame, size, RES.LANCZOS)
-    table = [int(i * BG_BRIGHTNESS) for i in range(256)]
+    table = [int(i * brightness) for i in range(256)]
     return f.point(table * 3).convert("RGBA")
 
 
@@ -114,14 +130,20 @@ def _brackets(img, inset=16, length=34, thick=3, color=(181, 107, 255, 220)):
     put(img, lay, 0, 0)
 
 
-def _build_overlay(username, punisher, reason, ptype, case_no, date_text, avatar_bytes):
+def _build_overlay(username, punisher, reason, ptype, case_no, date_text, avatar_bytes, sev=None, banner=False):
     """Everything on the card except the moving background. Drawn once, at 2x, then shrunk."""
-    color, sev = TYPE_STYLE[ptype]
+    color, base_sev = TYPE_STYLE[ptype]
+    sev = base_sev if sev is None else sev
     w, h = W * S, H * S
     img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
 
     # dark purple tint so the text stays readable over the moving background
-    put(img, lin_grad(w, h, [(0, (12, 3, 28, 165)), (0.55, (20, 6, 44, 120)), (1, (9, 2, 20, 165))], 135), 0, 0)
+    # (with the skull banner the tint is much lighter so the skulls stay clearly visible)
+    if banner:
+        tint = [(0, (4, 2, 10, 70)), (0.55, (4, 2, 10, 25)), (1, (4, 2, 10, 70))]
+    else:
+        tint = [(0, (12, 3, 28, 165)), (0.55, (20, 6, 44, 120)), (1, (9, 2, 20, 165))]
+    put(img, lin_grad(w, h, tint, 135), 0, 0)
 
     # soft glow around the inside edge
     mask = Image.new("L", (w, h), 0)
@@ -142,8 +164,9 @@ def _build_overlay(username, punisher, reason, ptype, case_no, date_text, avatar
     put(img, lines, 0, 0)
 
     # glass panels behind the avatar column and the three fields
-    _panel(img, 28, 84, 250, 358, 18, (10, 3, 22, 150), (139, 61, 255, 90))
-    _panel(img, 288, 238, 590, 292 if has_duration(reason) else 228, 18, (10, 3, 22, 140), (139, 61, 255, 70))
+    pa, pb = (70, 55) if banner else (150, 140)
+    _panel(img, 28, 84, 250, 358, 18, (10, 3, 22, pa), (139, 61, 255, 90))
+    _panel(img, 288, 238, 590, 292 if has_duration(reason) else 228, 18, (10, 3, 22, pb), (139, 61, 255, 70))
 
     # top bar
     tf = font("Orbitron", 700, 20)
@@ -154,8 +177,9 @@ def _build_overlay(username, punisher, reason, ptype, case_no, date_text, avatar
     # title
     put_text(img, px(300), px(132), "NEW", font("Orbitron", 900, 62), (255, 255, 255, 255), sp=4,
              glow=((181, 107, 255), 32))
-    put_text(img, px(300), px(172), "PUNISHMENT", font("Orbitron", 900, 30), (255, 92, 240, 255), sp=14,
-             glow=((255, 92, 240), 14))
+    title_col = tuple(color) if ptype == "BLACKLIST" else (255, 92, 240)
+    put_text(img, px(300), px(172), TITLE_WORD.get(ptype, "PUNISHMENT"), font("Orbitron", 900, 30),
+             title_col + (255,), sp=14, glow=(title_col, 14))
 
     # avatar, ornament, severity bar
     draw_avatar(img, avatar_bytes)
@@ -207,7 +231,7 @@ def _sweep_band(fw, fh):
 
 
 # ------------------------------ encoding ------------------------------
-def _encode(overlay, tag_left, bg_frames, durations, scale, step):
+def _encode(overlay, tag_left, bg_frames, durations, scale, step, brightness, dot_color=(255, 92, 240)):
     fw, fh = int(round(W * scale)), int(round(H * scale))
     if scale != 1.0:
         overlay = overlay.resize((fw, fh), RES.LANCZOS)
@@ -215,7 +239,7 @@ def _encode(overlay, tag_left, bg_frames, durations, scale, step):
     idx = list(range(0, len(bg_frames), step))
     n = len(idx)
     band = _sweep_band(fw, fh)
-    dot = _blink_dot()
+    dot = _blink_dot(dot_color)
     if scale != 1.0:
         dot = dot.resize((int(dot.width * scale), int(dot.height * scale)), RES.LANCZOS)
     dot_xy = (int((tag_left - 16) * scale) - dot.width // 2, int(42 * scale) - dot.height // 2)
@@ -225,8 +249,14 @@ def _encode(overlay, tag_left, bg_frames, durations, scale, step):
     corner = corner.resize((fw, fh), RES.LANCZOS)
     hole = corner.point(lambda v: 255 if v < 128 else 0)        # 255 = rounded-corner area -> transparent
 
+    prepped = {}                                                # a still banner is only prepared once
+
     def compose(k):
-        base = _prep_bg(bg_frames[idx[k]], (fw, fh))
+        frame = bg_frames[idx[k]]
+        key = id(frame)
+        if key not in prepped:
+            prepped[key] = _prep_bg(frame, (fw, fh), brightness)
+        base = prepped[key].copy()
         base.alpha_composite(overlay)
         t = k / max(1, n)
         if t < 0.75:                                            # one sweep per loop, then a pause
@@ -248,9 +278,14 @@ def _encode(overlay, tag_left, bg_frames, durations, scale, step):
     pal = Image.new("P", (1, 1))
     pal.putpalette(colors)
 
+    # Slot 255 is reserved for the see-through corners (it is black). A very dark background would
+    # also land on it and turn into holes, so those pixels are moved to the darkest real colour.
+    darkest = min(range(255), key=lambda i: sum(colors[i * 3:i * 3 + 3]))
+    remap = list(range(255)) + [darkest]
+
     out_frames = []
     for k in range(n):
-        q = compose(k).quantize(palette=pal, dither=0)
+        q = compose(k).quantize(palette=pal, dither=0).point(remap)
         q.paste(TRANSPARENT, mask=hole)
         out_frames.append(q)
 
@@ -264,20 +299,32 @@ def _encode(overlay, tag_left, bg_frames, durations, scale, step):
 
 
 def render_card_gif(username, punisher, reason, ptype, case_no, date_text,
-                    avatar_bytes=None, max_bytes=MAX_BYTES) -> bytes:
+                    avatar_bytes=None, max_bytes=MAX_BYTES, sev=None) -> bytes:
     """Same arguments as punishment_card.render_card, but returns an animated GIF.
+    sev overrides the severity bar (warnings use 33 / 66 / 100).
     Raises FileNotFoundError if card_bg.gif is missing (the bot then falls back to the PNG card)."""
     ptype = ptype.upper()
     username, punisher = clean_for_card(username) or "Unknown", clean_for_card(punisher) or "Unknown"
     reason = clean_for_card(reason) or "-"
 
-    bg_frames, durations = _load_bg(BG_PATH)
-    overlay, tag_left = _build_overlay(username, punisher, reason, ptype, case_no, date_text, avatar_bytes)
+    brightness = BG_BRIGHTNESS
+    use_banner = False
+    if ptype == "BLACKLIST" and os.path.exists(BANNER_PATH):
+        bg_frames, durations = _load_banner(BANNER_PATH)
+        brightness = BANNER_BRIGHTNESS
+        use_banner = True
+    else:
+        if ptype == "BLACKLIST":
+            print(f"⚠️ Blacklist banner not found at {BANNER_PATH} - using the normal card background.")
+        bg_frames, durations = _load_bg(BG_PATH)
+
+    overlay, tag_left = _build_overlay(username, punisher, reason, ptype, case_no, date_text, avatar_bytes, sev, use_banner)
+    dot_color = tuple(TYPE_STYLE[ptype][0]) if ptype == "BLACKLIST" else (255, 92, 240)
 
     data = b""
     for scale in SCALES:
-        data = _encode(overlay, tag_left, bg_frames, durations, scale, 1)
+        data = _encode(overlay, tag_left, bg_frames, durations, scale, 1, brightness, dot_color)
         if len(data) <= max_bytes:
             return data
     # still too big: keep the smallest size but drop every other frame
-    return _encode(overlay, tag_left, bg_frames, durations, SCALES[-1], 2)
+    return _encode(overlay, tag_left, bg_frames, durations, SCALES[-1], 2, brightness, dot_color)
