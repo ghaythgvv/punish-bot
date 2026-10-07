@@ -271,13 +271,13 @@ def draw_avatar(img, avatar_bytes):
 
 
 def draw_bar(img, sev, color=(255, 92, 240)):
-    """Severity meter: 12 slanted neon blocks that light up one by one (dark -> bright, in the
-    punishment's colour) with a soft glow, a glowing tip on the last lit block and a big % readout."""
+    """Severity meter: 12 slanted neon blocks, ALWAYS completely full (dark -> bright, in the
+    punishment's colour) with a soft glow, a glowing tip on the last block and a caption below."""
     bx, by, bw, bh = 44, 396, 220, 17
     color = tuple(color)
     n, gap, slant = 12, 4, 5
     seg_w = (bw - slant - gap * (n - 1)) / n
-    lit = 0 if sev <= 0 else max(1, round(sev / 100 * n))
+    lit = n   # always completely full, whatever the punishment type / severity is
     W_, H_ = px(bw), px(bh)
 
     def poly(i, y0=0.0, y1=None):
