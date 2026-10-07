@@ -271,65 +271,75 @@ def draw_avatar(img, avatar_bytes):
 
 
 def draw_bar(img, sev, color=(255, 92, 240)):
-    """Severity bar: glossy rounded fill in the punishment's color, soft glow,
-    segment ticks, a bright end cap and a small label underneath."""
-    bx, by, bw, bh = 44, 402, 220, 12
+    """Severity meter: 12 slanted neon blocks that light up one by one (dark -> bright, in the
+    punishment's colour) with a soft glow, a glowing tip on the last lit block and a big % readout."""
+    bx, by, bw, bh = 44, 396, 220, 17
     color = tuple(color)
+    n, gap, slant = 12, 4, 5
+    seg_w = (bw - slant - gap * (n - 1)) / n
+    lit = 0 if sev <= 0 else max(1, round(sev / 100 * n))
     W_, H_ = px(bw), px(bh)
-    r = H_ // 2
 
-    fill_w = max(H_, px(bw * sev / 100))
-    rmask = Image.new("L", (W_, H_), 0)
-    ImageDraw.Draw(rmask).rounded_rectangle((0, 0, W_ - 1, H_ - 1), r, fill=255)
-    fmask = Image.new("L", (fill_w, H_), 0)
-    ImageDraw.Draw(fmask).rounded_rectangle((0, 0, fill_w - 1, H_ - 1), r, fill=255)
+    def poly(i, y0=0.0, y1=None):
+        """Slanted block i between heights y0..y1 (1x px), as 2x coordinates."""
+        y1 = bh if y1 is None else y1
+        x = i * (seg_w + gap)
+        left = lambda y: x + slant * (1 - y / bh)
+        return [(px(left(y0)), px(y0)), (px(left(y0) + seg_w), px(y0)),
+                (px(left(y1) + seg_w), px(y1)), (px(left(y1)), px(y1))]
 
-    # glow behind the filled part
-    pad = px(10)
-    gl = Image.new("L", (W_ + 2 * pad, H_ + 2 * pad), 0)
-    gl.paste(fmask, (pad, pad))
-    gl = gl.filter(ImageFilter.GaussianBlur(px(5))).point(lambda v: int(v * 0.75))
-    glow = Image.new("RGBA", gl.size, color + (0,))
-    glow.putalpha(gl)
-    put(img, glow, px(bx) - pad, px(by) - pad)
+    def mix(c0, c1, k):
+        return tuple(int(c0[j] + (c1[j] - c0[j]) * k) for j in range(3))
 
-    # track
-    bar = Image.new("RGBA", (W_, H_), (30, 16, 52, 255))
-    ImageDraw.Draw(bar).rectangle((0, 0, W_, H_ // 3), fill=(20, 9, 36, 255))
+    dark = tuple(int(c * 0.62) for c in color)
 
-    # fill: dark -> bright gradient, glossy top half
-    dark = tuple(int(c * 0.45) for c in color)
-    fill = lin_grad(fill_w, H_, [(0, dark + (255,)), (1, color + (255,))], 90)
-    fill.alpha_composite(Image.new("RGBA", (fill_w, H_ * 2 // 5), (255, 255, 255, 70)), (0, px(1)))
-    fill.putalpha(ImageChops.multiply(fill.getchannel("A"), fmask))
-    bar.alpha_composite(fill)
+    # empty blocks: dark glass with a faint coloured outline
+    track = Image.new("RGBA", (W_, H_), (0, 0, 0, 0))
+    td = ImageDraw.Draw(track)
+    for i in range(n):
+        td.polygon(poly(i), fill=(24, 12, 42, 235))
+        td.line(poly(i) + [poly(i)[0]], fill=color + (70,), width=px(0.9))
+    put(img, track, px(bx), px(by))
 
-    # segment ticks at 25 / 50 / 75 %
-    td = ImageDraw.Draw(bar)
-    for pct in (25, 50, 75):
-        x = px(bw * pct / 100)
-        td.rectangle((x - px(0.6), 0, x + px(0.6), H_), fill=(10, 3, 22, 170))
+    if lit:
+        fill = Image.new("RGBA", (W_, H_), (0, 0, 0, 0))
+        fd = ImageDraw.Draw(fill)
+        white = (255, 255, 255)
+        for i in range(lit):
+            k = i / max(1, n - 1)
+            c = mix(dark, color, k)
+            fd.polygon(poly(i), fill=mix(c, (0, 0, 0), 0.10) + (255,))                 # base
+            fd.polygon(poly(i, 0, bh * 0.55), fill=mix(c, white, 0.16) + (255,))       # glossy top, still in the colour
+        # the last lit block shines the brightest
+        j = lit - 1
+        fd.polygon(poly(j), fill=mix(color, white, 0.10) + (255,))
+        fd.polygon(poly(j, 0, bh * 0.55), fill=mix(color, white, 0.50) + (255,))
 
-    # bright end cap
-    ex = fill_w - r
-    cap = Image.new("RGBA", (W_, H_), (0, 0, 0, 0))
-    ImageDraw.Draw(cap).ellipse((ex - px(2.2), r - px(2.2), ex + px(2.2), r + px(2.2)), fill=(255, 255, 255, 235))
-    bar.alpha_composite(cap.filter(ImageFilter.GaussianBlur(px(0.6))))
+        # soft glow behind the lit blocks
+        pad = px(12)
+        gl = Image.new("RGBA", (W_ + 2 * pad, H_ + 2 * pad), color + (0,))
+        ga = Image.new("L", gl.size, 0)
+        ga.paste(fill.getchannel("A"), (pad, pad))
+        ga = ga.filter(ImageFilter.GaussianBlur(px(5))).point(lambda v: min(255, int(v * 1.1)))
+        gl.putalpha(ga)
+        put(img, gl, px(bx) - pad, px(by) - pad)
+        put(img, fill, px(bx), px(by))
 
-    bar.putalpha(ImageChops.multiply(bar.getchannel("A"), rmask))
-    put(img, bar, px(bx), px(by))
+        # spark at the tip of the last lit block
+        tx = j * (seg_w + gap) + slant / 2 + seg_w
+        tip = Image.new("RGBA", (px(24), px(24)), (255, 255, 255, 0))
+        ImageDraw.Draw(tip).ellipse((px(12 - 2.4), px(12 - 2.4), px(12 + 2.4), px(12 + 2.4)), fill=(255, 255, 255, 255))
+        halo = tip.filter(ImageFilter.GaussianBlur(px(3)))
+        halo.alpha_composite(tip)
+        put(img, halo, px(bx + tx) - px(12), px(by + bh / 2) - px(12))
 
-    # thin outline
-    ol = Image.new("RGBA", (W_, H_), (0, 0, 0, 0))
-    ImageDraw.Draw(ol).rounded_rectangle((0, 0, W_ - 1, H_ - 1), r, outline=(139, 61, 255, 110), width=px(1))
-    put(img, ol, px(bx), px(by))
-
-    # label
+    # labels: small caption on the left, big glowing percentage on the right
     lf = font("Orbitron", 700, 11)
-    base = px(by + bh + 17)
+    base = px(by + bh + 22)
     put_text(img, px(bx), base, "SEVERITY", lf, (139, 111, 192, 255), sp=3)
+    pf = font("Orbitron", 900, 17)
     pct = f"{sev}%"
-    put_text(img, px(bx + bw) - text_w(pct, lf, 2), base, pct, lf, color + (255,), sp=2)
+    put_text(img, px(bx + bw) - text_w(pct, pf, 1), base + px(1), pct, pf, color + (255,), sp=1, glow=(color, 10))
 
 
 def draw_ornament(img, color):
