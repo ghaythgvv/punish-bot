@@ -270,21 +270,6 @@ def draw_avatar(img, avatar_bytes):
     put(img, inner, px(ax + 4), px(ay + 4))
 
 
-def _skull(draw, x, y, w, h, fill):
-    """One little skull inside the box (x, y, w, h) in 2x pixels. Eyes, nose and teeth are cut out
-    (drawn fully transparent) so the card shows through them."""
-    def X(v): return x + w * v / 20.0
-    def Y(v): return y + h * v / 22.0
-    hole = (0, 0, 0, 0)
-    draw.ellipse((X(1.5), Y(0.5), X(18.5), Y(15.5)), fill=fill)                    # cranium
-    draw.rounded_rectangle((X(5), Y(12), X(15), Y(21.5)), radius=int(w * 0.12), fill=fill)   # jaw
-    draw.ellipse((X(4.8), Y(6.6), X(9.4), Y(11.8)), fill=hole)                     # left eye
-    draw.ellipse((X(10.6), Y(6.6), X(15.2), Y(11.8)), fill=hole)                   # right eye
-    draw.polygon([(X(10), Y(12)), (X(8.7), Y(14.8)), (X(11.3), Y(14.8))], fill=hole)   # nose
-    for tx in (7.6, 10, 12.4):                                                     # teeth gaps
-        draw.line((X(tx), Y(16.6), X(tx), Y(21.5)), fill=hole, width=max(1, int(w * 0.07)))
-
-
 def draw_bar(img, sev, color=(255, 92, 240)):
     """Severity meter: 12 slanted neon blocks that light up one by one (dark -> bright, in the
     punishment's colour) with a soft glow, a glowing tip on the last lit block and a big % readout."""
@@ -351,38 +336,8 @@ def draw_bar(img, sev, color=(255, 92, 240)):
     # labels: small caption on the left, big glowing percentage on the right
     lf = font("Orbitron", 700, 11)
     base = px(by + bh + 22)
-    put_text(img, px(bx), base, "SEVERITY", lf, (139, 111, 192, 255), sp=3)
-    # five skulls instead of a percentage: the more severe the punishment, the more of them burn
-    skulls, sw, sh_, sgap = 5, 19, 21, 4
-    burning = 0 if sev <= 0 else max(1, round(sev / 100 * skulls))
-    total_w = skulls * sw + (skulls - 1) * sgap
-    sx0, sy0 = bx + bw - total_w, by + bh + 4
-    lay = Image.new("RGBA", (px(total_w), px(sh_)), (0, 0, 0, 0))
-    ld = ImageDraw.Draw(lay)
-    lit_lay = Image.new("RGBA", lay.size, (0, 0, 0, 0))
-    lld = ImageDraw.Draw(lit_lay)
-    dim = mix(tuple(int(c * 0.22) for c in color), (22, 12, 40), 0.4)
-    for i in range(skulls):
-        ox = px(i * (sw + sgap))
-        if i < burning:
-            k = i / max(1, skulls - 1)
-            c = mix(tuple(int(c * 0.82) for c in color), color, k)
-            if i == burning - 1:
-                c = mix(color, (255, 255, 255), 0.45)       # the last one burns whitest
-            _skull(lld, ox, 0, px(sw), px(sh_), c + (255,))
-        else:
-            _skull(ld, ox, 0, px(sw), px(sh_), dim + (255,))
-    # glow behind the burning skulls
-    if burning:
-        pad = px(10)
-        ga = Image.new("L", (lit_lay.width + 2 * pad, lit_lay.height + 2 * pad), 0)
-        ga.paste(lit_lay.getchannel("A"), (pad, pad))
-        ga = ga.filter(ImageFilter.GaussianBlur(px(4))).point(lambda v: min(255, int(v * 1.0)))
-        gl = Image.new("RGBA", ga.size, color + (0,))
-        gl.putalpha(ga)
-        put(img, gl, px(sx0) - pad, px(sy0) - pad)
-    put(img, lay, px(sx0), px(sy0))
-    put(img, lit_lay, px(sx0), px(sy0))
+    cap = "SEVERITY"
+    put_text(img, px(bx) + (px(bw) - int(text_w(cap, lf, 3))) // 2, base, cap, lf, (139, 111, 192, 255), sp=3)
 
 
 def draw_ornament(img, color):
