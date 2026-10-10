@@ -17,6 +17,7 @@ the same folder, together with:
 
 import io
 import os
+import unicodedata
 from functools import lru_cache
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageOps, ImageSequence
@@ -59,25 +60,41 @@ _check_fonts()
 
 
 # ------------------------------ text cleanup ------------------------------
-def clean_for_card(text: str) -> str:
-    """Removes characters the card font can't draw (they'd show up as empty boxes),
-    e.g. emoji or Arabic in a display name. Returns '' if nothing drawable is left,
-    so the caller can fall back to the plain username."""
-    text = " ".join((text or "").split())
-    if not text:
-        return ""
+@lru_cache(maxsize=1)
+def _notdef_glyph():
+    f = font("Rajdhani", 700, 28)
+    im = Image.new("L", (80, 90), 0)
+    ImageDraw.Draw(im).text((10, 10), "\U0010FFFF", font=f, fill=255)
+    return im.tobytes()
+
+
+@lru_cache(maxsize=4096)
+def _can_draw(ch: str) -> bool:
+    """True if the card font really draws this character (not the empty 'missing' box)."""
     try:
         f = font("Rajdhani", 700, 28)
-
-        def glyph(ch):  # what the font actually draws for this character
-            im = Image.new("L", (80, 90), 0)
-            ImageDraw.Draw(im).text((10, 10), ch, font=f, fill=255)
-            return im.tobytes()
-
-        notdef = glyph("\U0010FFFF")          # the font's "missing character" box
-        kept = [ch for ch in text if ch == " " or glyph(ch) != notdef]
+        im = Image.new("L", (80, 90), 0)
+        ImageDraw.Draw(im).text((10, 10), ch, font=f, fill=255)
+        return im.tobytes() != _notdef_glyph()
     except Exception:
-        return text
+        return True
+
+
+def clean_for_card(text: str) -> str:
+    """Makes a name/reason safe for the card font.
+    1) NFKC turns fancy letters (math bold, full-width, circled...) into normal ones.
+    2) Invisible/control characters and stacked accents (zalgo) are dropped.
+    3) Anything the font still can't draw (emoji, Arabic...) is dropped.
+    Returns '' if nothing drawable is left."""
+    text = unicodedata.normalize("NFKC", text or "")
+    text = "".join(
+        ch for ch in text
+        if unicodedata.category(ch) not in ("Cc", "Cf", "Co", "Cn", "Mn", "Me")
+    )
+    text = " ".join(text.split())
+    if not text:
+        return ""
+    kept = [ch for ch in text if ch == " " or _can_draw(ch)]
     return " ".join("".join(kept).split())
 
 
@@ -164,7 +181,8 @@ def _build_overlay(username, punisher, reason, ptype, case_no, date_text, avatar
     put(img, lines, 0, 0)
 
     # glass panels behind the avatar column and the three fields
-    pa, pb = (70, 55) if banner else (150, 140)
+    # (the field panel is darker with the skull banner so USER / PUNISHER / REASON stay readable)
+    pa, pb = (110, 150) if banner else (150, 140)
     _panel(img, 28, 84, 250, 358, 18, (10, 3, 22, pa), (139, 61, 255, 90))
     _panel(img, 288, 238, 590, 292 if has_duration(reason) else 228, 18, (10, 3, 22, pb), (139, 61, 255, 70))
 
