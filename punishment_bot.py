@@ -901,7 +901,7 @@ async def warn_cmd(interaction: discord.Interaction, member: discord.Member, rea
         card_type = "BAN" if auto_ban else "WARNING"
         card_reason = reason
         if auto_ban:
-            card_reason = f"{reason} — {MAX_WARNINGS} active warnings reached. Automatic ban applied."[:300]
+            card_reason = f"{reason} - {MAX_WARNINGS} active warnings reached. Automatic ban applied."[:300]
 
         record_extra = {
             "warning_active": True,
@@ -1020,7 +1020,7 @@ async def unwarn_cmd(interaction: discord.Interaction, member: discord.Member, r
 
     # The card shows no case number (the punisher is already on the card);
     # the case stays in the saved record and the "View Punishment Details" button.
-    clear_reason = f"Warning removed — {reason}"[:300]
+    clear_reason = f"Warning removed: {reason[:1].upper() + reason[1:]}"[:300]
     await post_warning_cleared_card(interaction.guild, member, interaction.user, clear_reason, [case_no] if case_no else [])
 
     await dm_member(
