@@ -59,7 +59,9 @@ Before running:
     - Railway: add a Volume mounted at /data so cases and the blacklist survive redeploys.
     - This bot needs its OWN Discord application + token (shared tokens overwrite each other's commands).
 
-If the slash commands ever disappear: an admin mentions the bot and types "sync".
+Slash commands vanishing: this happens when ANOTHER bot uses the same token (each one overwrites the
+other's commands). Give every bot its own Discord application + token. The bot checks its commands once
+at startup and re-registers any that are missing. Manual fix: an admin mentions the bot and types "sync".
 """
 
 import io
@@ -761,23 +763,34 @@ async def sync_commands() -> bool:
     return False
 
 
-@tasks.loop(hours=6)
-async def resync_loop():
+_commands_checked = False
+
+
+async def ensure_commands():
+    """Runs ONCE at startup: if any of this bot's slash commands are missing on Discord, sync them again.
+    (There is no timed re-sync anymore - it was overwriting other bots' commands every 6 hours.)"""
+    mine = {c.name for c in bot.tree.get_commands(guild=GUILD)}
     try:
-        await sync_commands()
-    except Exception:
-        traceback.print_exc()
+        live = {c.name for c in await bot.tree.fetch_commands(guild=GUILD)}
+    except Exception as e:
+        print(f"⚠️ Couldn't read the live slash commands ({e}) - syncing to be safe")
+        live = set()
 
-
-@resync_loop.before_loop
-async def _wait_ready():
-    await bot.wait_until_ready()
+    missing = mine - live
+    if not missing:
+        print(f"✅ All {len(mine)} slash commands are registered")
+        return
+    print(f"⚠️ Missing slash commands: {', '.join(sorted(missing))} - syncing")
+    if await sync_commands():
+        print(
+            "🚨 If this shows up after EVERY restart, another bot is using the SAME token as this one "
+            "and wipes these commands when it starts. Give each bot its own Discord application + token."
+        )
 
 
 @bot.event
 async def setup_hook():
     bot.add_dynamic_items(PunishmentDetailsButton)
-    resync_loop.start()
     warning_expiry_loop.start()
 
 
@@ -791,7 +804,11 @@ async def sync_cmd(ctx: commands.Context):
 
 @bot.event
 async def on_ready():
+    global _commands_checked
     print(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
+    if not _commands_checked:
+        _commands_checked = True
+        await ensure_commands()
     print(f"👮 Staff role IDs: {sorted(STAFF_ROLE_IDS) or 'none set'}")
     print(f"🛡️ Moderator role ID: {MOD_ROLE_ID}")
     print(f"🔨 Who can ban: {TIER_LABEL[BAN_MIN_TIER]} | kick: {TIER_LABEL[KICK_MIN_TIER]} | blacklist: {TIER_LABEL[BLACKLIST_MIN_TIER]}")
