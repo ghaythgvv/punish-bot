@@ -80,13 +80,35 @@ def _can_draw(ch: str) -> bool:
         return True
 
 
+# Letter styles that NFKC does NOT convert: small caps, squared / negative squared / negative circled
+# letters and regional-indicator letters.
+_EXTRA_LETTERS = {}
+for _src, _dst in zip("ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘǫʀꜱᴛᴜᴠᴡʏᴢ", "ABCDEFGHIJKLMNOPQRSTUVWYZ"):
+    _EXTRA_LETTERS[ord(_src)] = _dst
+for _base in (0x1F130, 0x1F150, 0x1F170, 0x1F1E6):
+    for _i in range(26):
+        _EXTRA_LETTERS[_base + _i] = chr(65 + _i)
+
+# Punctuation the card font has no glyph for (it used to be deleted, e.g. "removed — mistake" became
+# "removed mistake"). These are swapped for plain look-alikes instead.
+for _src, _dst in {
+    "—": "-", "–": "-", "‒": "-", "―": "-", "−": "-", "‐": "-", "‑": "-",
+    "’": "'", "‘": "'", "‚": "'", "`": "'", "´": "'",
+    "“": '"', "”": '"', "„": '"', "«": '"', "»": '"',
+    "…": "...", "•": "-", "·": "-", "●": "-", "→": "->", "←": "<-",
+    "\u00a0": " ", "\u2009": " ", "\u202f": " ",
+}.items():
+    _EXTRA_LETTERS[ord(_src)] = _dst
+
+
 def clean_for_card(text: str) -> str:
     """Makes a name/reason safe for the card font.
-    1) NFKC turns fancy letters (math bold, full-width, circled...) into normal ones.
+    1) Small caps / squared / circled letters and NFKC turn fancy letters (math bold, italic,
+       script, full-width...) into normal ones.
     2) Invisible/control characters and stacked accents (zalgo) are dropped.
     3) Anything the font still can't draw (emoji, Arabic...) is dropped.
     Returns '' if nothing drawable is left."""
-    text = unicodedata.normalize("NFKC", text or "")
+    text = unicodedata.normalize("NFKC", (text or "").translate(_EXTRA_LETTERS))
     text = "".join(
         ch for ch in text
         if unicodedata.category(ch) not in ("Cc", "Cf", "Co", "Cn", "Mn", "Me")
