@@ -1,5 +1,5 @@
 """
-ELT Punishment Bot  (v3)
+ELT Punishment Bot  (v3.1)
 =======================================
 Slash commands: /warn /unwarn /mute /timeout /kick /ban /blacklist /unblacklist
                 +  /warnings /history /blacklisted
@@ -27,6 +27,13 @@ Moderator role. And nobody can punish someone whose top role is equal to or abov
       a role, it is removed again; if they remove the blacklist role, it is put back; if the member
       leaves and rejoins, they get the blacklist role again.
     - Only /unblacklist lifts it.
+
+What's new in v3.1
+    - Names on the cards: fancy Unicode names (bold / full-width letters) are converted to plain letters
+      (punishment_gif.clean_for_card), and card_name() falls back to the global name / username /
+      user ID so a card never shows a lone "!" or an empty name.
+    - The WARNING CLEARED card text no longer shows the case number (it is still in the details button).
+    - /unwarn now DMs the member that a warning was removed.
 
 What's new in v3
     - /blacklist, /unblacklist, /blacklisted. The Super Member role is never removed by /blacklist.
@@ -221,7 +228,25 @@ def next_case() -> int:
 
 
 def card_name(member: discord.abc.User) -> str:
-    return clean_for_card(member.display_name) or member.name
+    """Best readable name for the card. Tries the display name, then the global name, then the
+    username, and skips any whose cleaned version is empty or just symbols (e.g. '!')."""
+    candidates = [
+        getattr(member, "display_name", None),
+        getattr(member, "global_name", None),
+        getattr(member, "name", None),
+    ]
+    cleaned = [(clean_for_card(c) or "").strip() for c in candidates if c]
+
+    def alnum(s: str) -> int:
+        return sum(ch.isalnum() for ch in s)
+
+    for s in cleaned:              # first choice: at least 2 real letters/digits
+        if alnum(s) >= 2:
+            return s
+    for s in cleaned:              # otherwise: at least 1
+        if alnum(s) >= 1:
+            return s
+    return str(member.id)          # last resort, never an empty or symbol-only card
 
 
 def audit_reason(reason: str, action: str, by: discord.abc.User) -> str:
@@ -970,10 +995,16 @@ async def unwarn_cmd(interaction: discord.Interaction, member: discord.Member, r
         remaining = active_warning_count(member.id)
         await update_warning_roles(interaction.guild, member, min(remaining, MAX_WARNINGS - 1))
 
-    clear_reason = (
-        f"Warning ELT-{case_no:04d} was removed by {card_name(interaction.user)}. Reason: {reason}"
-    )[:300]
+    # The card shows no case number (the punisher is already on the card);
+    # the case stays in the saved record and the "View Punishment Details" button.
+    clear_reason = f"Warning removed — {reason}"[:300]
     await post_warning_cleared_card(interaction.guild, member, interaction.user, clear_reason, [case_no])
+
+    await dm_member(
+        member, interaction.guild,
+        f"A warning was removed in {interaction.guild.name}", reason, 0x57F287,
+        f"Active warnings left: {remaining}/{MAX_WARNINGS}.",
+    )
 
     await interaction.followup.send(
         f"🟢 Warning ELT-{case_no:04d} removed from {member.mention}. Active warnings remaining: **{remaining}**.",
