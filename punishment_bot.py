@@ -448,6 +448,17 @@ def warning_percent(count: int) -> int:
     return 0 if count <= 0 else 33 if count == 1 else 66 if count == 2 else 100
 
 
+def role_warning_level(guild: discord.Guild, member: discord.Member) -> int:
+    """The warning level the member's Warn roles show (0 / 1 / 2). Used when the saved records
+    and the roles disagree (for example after the database file was lost on a redeploy)."""
+    warn1, warn2 = guild.get_role(WARN_1_ROLE_ID), guild.get_role(WARN_2_ROLE_ID)
+    if warn2 is not None and warn2 in member.roles:
+        return 2
+    if warn1 is not None and warn1 in member.roles:
+        return 1
+    return 0
+
+
 async def update_warning_roles(guild: discord.Guild, member: discord.Member, count: int):
     """1 warning: Warn 1 | 2 warnings: Warn 2 | 0 or 3+: none."""
     # A blacklisted member keeps only the blacklist role.
@@ -785,6 +796,11 @@ async def on_ready():
     print(f"🛡️ Moderator role ID: {MOD_ROLE_ID}")
     print(f"🔨 Who can ban: {TIER_LABEL[BAN_MIN_TIER]} | kick: {TIER_LABEL[KICK_MIN_TIER]} | blacklist: {TIER_LABEL[BLACKLIST_MIN_TIER]}")
     print(f"⚠️ Warning expiration: {WARNING_EXPIRE_DAYS} days")
+    if (os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("RAILWAY_PROJECT_ID")) and not (
+        os.environ.get("DATA_DIR") or os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")
+    ):
+        print("🚨 NO VOLUME: the case database is stored inside the container and is DELETED on every "
+              "redeploy. Add a Volume mounted at /data in Railway (Settings > Volumes) and redeploy.")
     print(f"🟢 Warning cleared channel: {WARNING_CLEAR_CHANNEL_ID}")
     print(f"💀 Blacklist banner: {'found' if os.path.exists(BANNER_PATH) else 'NOT FOUND at ' + BANNER_PATH}")
 
@@ -878,7 +894,7 @@ async def warn_cmd(interaction: discord.Interaction, member: discord.Member, rea
 
     # One warn at a time: counting, the card and the roles can't be raced by a second staff member.
     async with warning_lock:
-        warning_count = active_warning_count(member.id) + 1
+        warning_count = max(active_warning_count(member.id), role_warning_level(guild, member)) + 1
         percent = warning_percent(warning_count)
         auto_ban = warning_count >= MAX_WARNINGS and can_ban(interaction.user)
 
@@ -978,27 +994,34 @@ async def unwarn_cmd(interaction: discord.Interaction, member: discord.Member, r
     if problem:
         return await reject(interaction, "unwarn", member, problem)
 
+    orphan = False   # True = the member has a Warn role but no saved warning record
     async with warning_lock:
         active = active_warning_records(member.id)
-        if not active:
-            return await interaction.followup.send(f"ℹ️ {member.mention} has no active warnings.", ephemeral=True)
+        if active:
+            case_no, record = active[-1]   # newest only
+            record["warning_active"] = False
+            record["warning_cleared_at"] = discord.utils.utcnow().isoformat()
+            record["warning_cleared_by_id"] = interaction.user.id
+            record["warning_cleared_by_tag"] = str(interaction.user)
+            record["warning_clear_method"] = "manual_unwarn"
+            record["warning_clear_reason"] = reason
+            save_db()
+            remaining = active_warning_count(member.id)
+        else:
+            level = role_warning_level(interaction.guild, member)
+            if level == 0:
+                return await interaction.followup.send(f"ℹ️ {member.mention} has no active warnings.", ephemeral=True)
+            # The Warn role is there but the record is missing: lower the role by one level.
+            orphan, case_no = True, None
+            remaining = level - 1
+            print(f"⚠️ /unwarn: {member} has a Warn role but no saved warning record — lowering the role only")
 
-        case_no, record = active[-1]   # newest only
-        record["warning_active"] = False
-        record["warning_cleared_at"] = discord.utils.utcnow().isoformat()
-        record["warning_cleared_by_id"] = interaction.user.id
-        record["warning_cleared_by_tag"] = str(interaction.user)
-        record["warning_clear_method"] = "manual_unwarn"
-        record["warning_clear_reason"] = reason
-        save_db()
-
-        remaining = active_warning_count(member.id)
         await update_warning_roles(interaction.guild, member, min(remaining, MAX_WARNINGS - 1))
 
     # The card shows no case number (the punisher is already on the card);
     # the case stays in the saved record and the "View Punishment Details" button.
     clear_reason = f"Warning removed — {reason}"[:300]
-    await post_warning_cleared_card(interaction.guild, member, interaction.user, clear_reason, [case_no])
+    await post_warning_cleared_card(interaction.guild, member, interaction.user, clear_reason, [case_no] if case_no else [])
 
     await dm_member(
         member, interaction.guild,
@@ -1006,10 +1029,18 @@ async def unwarn_cmd(interaction: discord.Interaction, member: discord.Member, r
         f"Active warnings left: {remaining}/{MAX_WARNINGS}.",
     )
 
-    await interaction.followup.send(
-        f"🟢 Warning ELT-{case_no:04d} removed from {member.mention}. Active warnings remaining: **{remaining}**.",
-        ephemeral=True,
-    )
+    if orphan:
+        await interaction.followup.send(
+            f"🟢 Warning removed from {member.mention}. Active warnings remaining: **{remaining}**.\n"
+            f"ℹ️ I had no saved record of that warning (it was probably given before the database was reset), "
+            f"so I only lowered their Warn role.",
+            ephemeral=True,
+        )
+    else:
+        await interaction.followup.send(
+            f"🟢 Warning ELT-{case_no:04d} removed from {member.mention}. Active warnings remaining: **{remaining}**.",
+            ephemeral=True,
+        )
 
 
 # ================================================================
