@@ -1,5 +1,5 @@
 """
-ELT Punishment Bot  (v3.1)
+ELT Punishment Bot  (v3.2)
 =======================================
 Slash commands: /warn /unwarn /mute /timeout /kick /ban /blacklist /unblacklist
                 +  /warnings /history /blacklisted
@@ -27,6 +27,11 @@ Moderator role. And nobody can punish someone whose top role is equal to or abov
       a role, it is removed again; if they remove the blacklist role, it is put back; if the member
       leaves and rejoins, they get the blacklist role again.
     - Only /unblacklist lifts it.
+
+What's new in v3.2
+    - COMMAND WATCHDOG: every 10 minutes the bot checks that its slash commands still exist on Discord
+      and puts them back if another bot (using the SAME token) wiped them. It never syncs more than
+      15 times in 24 hours (Discord's limit). The real cure is still a separate token for each bot.
 
 What's new in v3.1
     - Names on the cards: fancy Unicode names (bold / full-width letters) are converted to plain letters
@@ -61,7 +66,8 @@ Before running:
 
 Slash commands vanishing: this happens when ANOTHER bot uses the same token (each one overwrites the
 other's commands). Give every bot its own Discord application + token. The bot checks its commands once
-at startup and re-registers any that are missing. Manual fix: an admin mentions the bot and types "sync".
+at startup (and every 10 minutes after that) and re-registers any that are missing.
+Manual fix: an admin mentions the bot and types "sync".
 """
 
 import io
@@ -768,7 +774,7 @@ _commands_checked = False
 
 async def ensure_commands():
     """Runs ONCE at startup: if any of this bot's slash commands are missing on Discord, sync them again.
-    (There is no timed re-sync anymore - it was overwriting other bots' commands every 6 hours.)"""
+    (The command watchdog below keeps checking every 10 minutes, and only syncs when something is missing.)"""
     mine = {c.name for c in bot.tree.get_commands(guild=GUILD)}
     try:
         live = {c.name for c in await bot.tree.fetch_commands(guild=GUILD)}
@@ -788,10 +794,45 @@ async def ensure_commands():
         )
 
 
+sync_times: list[float] = []
+
+
+@tasks.loop(minutes=10)
+async def command_watchdog():
+    """Every 10 minutes: if any of this bot's slash commands are gone from Discord, put them back."""
+    mine = {c.name for c in bot.tree.get_commands(guild=GUILD)}
+    try:
+        live = {c.name for c in await bot.tree.fetch_commands(guild=GUILD)}
+    except Exception as e:
+        print(f"⚠️ Watchdog couldn't read the live commands: {e}")
+        return
+
+    missing = mine - live
+    if not missing:
+        return
+
+    # Safety: Discord limits command updates per day, so never sync more than 15 times in 24h.
+    now = time.time()
+    sync_times[:] = [t for t in sync_times if now - t < 86400]
+    if len(sync_times) >= 15:
+        print("🚨 Watchdog: 15 re-syncs in 24h. Another bot with the SAME token keeps wiping the commands.")
+        return
+
+    print(f"🩹 Watchdog: missing {', '.join(sorted(missing))} — syncing again")
+    sync_times.append(now)
+    await sync_commands()
+
+
+@command_watchdog.before_loop
+async def _wait_ready_for_watchdog():
+    await bot.wait_until_ready()
+
+
 @bot.event
 async def setup_hook():
     bot.add_dynamic_items(PunishmentDetailsButton)
     warning_expiry_loop.start()
+    command_watchdog.start()
 
 
 @bot.command(name="sync")
