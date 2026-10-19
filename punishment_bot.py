@@ -1,5 +1,5 @@
 """
-ELT Punishment Bot  (v3.2)
+ELT Punishment Bot  (v3.3)
 =======================================
 Slash commands: /warn /unwarn /mute /timeout /kick /ban /blacklist /unblacklist
                 +  /warnings /history /blacklisted
@@ -27,6 +27,12 @@ Moderator role. And nobody can punish someone whose top role is equal to or abov
       a role, it is removed again; if they remove the blacklist role, it is put back; if the member
       leaves and rejoins, they get the blacklist role again.
     - Only /unblacklist lifts it.
+
+What's new in v3.3
+    - The old Warn role is swapped for the new one in ONE role edit (WARN 1/3 -> WARN 2/3 is a single
+      audit-log entry, and the old role can never be left behind).
+    - Every /warn DMs the member the reason, the warning count and (on warning 2) the timeout.
+    - 2nd warning = automatic 2 hour timeout + a TIMEOUT card (WARN_TIMEOUT_AT / WARN_TIMEOUT_HOURS).
 
 What's new in v3.2
     - COMMAND WATCHDOG: every 10 minutes the bot checks that its slash commands still exist on Discord
@@ -120,6 +126,10 @@ KEEP_ROLE_IDS = {SUPER_MEMBER_ROLE_ID}       # add more role IDs here if /blackl
 
 WARNING_EXPIRE_DAYS = 30
 MAX_WARNINGS = 3
+
+# Automatic timeout when a member reaches this warning number (and how long it lasts).
+WARN_TIMEOUT_AT = 2
+WARN_TIMEOUT_HOURS = 2
 
 WARNING_CLEAR_CHANNEL_ID = 1540154905644367893
 
@@ -468,7 +478,8 @@ def role_warning_level(guild: discord.Guild, member: discord.Member) -> int:
 
 
 async def update_warning_roles(guild: discord.Guild, member: discord.Member, count: int):
-    """1 warning: Warn 1 | 2 warnings: Warn 2 | 0 or 3+: none."""
+    """1 warning: Warn 1 | 2 warnings: Warn 2 | 0 or 3+: none.
+    The old Warn role is swapped for the new one in ONE role edit (one audit-log entry)."""
     # A blacklisted member keeps only the blacklist role.
     if member.id in blacklist_records:
         return
@@ -479,15 +490,16 @@ async def update_warning_roles(guild: discord.Guild, member: discord.Member, cou
         print("⚠️ Warning role not found — check WARN_1_ROLE_ID / WARN_2_ROLE_ID")
         return
 
-    wanted = {warn1} if count == 1 else {warn2} if count == 2 else set()
-    current = {r for r in (warn1, warn2) if r in member.roles}
-    add_roles, remove_roles = wanted - current, current - wanted
+    wanted = [warn1] if count == 1 else [warn2] if count == 2 else []
+    current = [r for r in member.roles if not r.is_default()]
+    base = [r for r in current if r not in (warn1, warn2)]
+    new_roles = base + wanted
+
+    if set(new_roles) == set(current):
+        return   # nothing to change
 
     try:
-        if add_roles:
-            await member.add_roles(*add_roles, reason="Warning level updated")
-        if remove_roles:
-            await member.remove_roles(*remove_roles, reason="Warning level updated")
+        await member.edit(roles=new_roles, reason="Warning level updated")
     except discord.Forbidden:
         print(f"❌ Bot cannot manage warning roles for {member} — move the bot role above them.")
     except discord.HTTPException as e:
@@ -854,6 +866,7 @@ async def on_ready():
     print(f"🛡️ Moderator role ID: {MOD_ROLE_ID}")
     print(f"🔨 Who can ban: {TIER_LABEL[BAN_MIN_TIER]} | kick: {TIER_LABEL[KICK_MIN_TIER]} | blacklist: {TIER_LABEL[BLACKLIST_MIN_TIER]}")
     print(f"⚠️ Warning expiration: {WARNING_EXPIRE_DAYS} days")
+    print(f"⏳ Warning {WARN_TIMEOUT_AT} = automatic {WARN_TIMEOUT_HOURS}h timeout")
     if (os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("RAILWAY_PROJECT_ID")) and not (
         os.environ.get("DATA_DIR") or os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")
     ):
@@ -982,6 +995,7 @@ async def warn_cmd(interaction: discord.Interaction, member: discord.Member, rea
             # Card failed before anything was saved: no record, so don't touch the roles.
             return
 
+        # old Warn role is swapped for the new one in a single role edit
         await update_warning_roles(guild, member, warning_count if auto_ban else min(warning_count, MAX_WARNINGS - 1))
 
     # ---- 3rd warning by someone allowed to ban: automatic ban ----
@@ -1009,12 +1023,41 @@ async def warn_cmd(interaction: discord.Interaction, member: discord.Member, rea
             await interaction.followup.send(f"⚠️ The BAN card was posted, but the automatic ban failed: {e}", ephemeral=True)
         return
 
-    # ---- normal warning: tell the member ----
-    await dm_member(
-        member, guild, f"You received a warning in {guild.name}", reason, 0xF5A623,
+    # ---- normal warning ----
+    # Warning WARN_TIMEOUT_AT (2nd) -> automatic timeout
+    timed_out = False
+    if warning_count == WARN_TIMEOUT_AT:
+        if guild.me and member.top_role >= guild.me.top_role:
+            await interaction.followup.send(
+                "⚠️ I can't time that member out: their highest role is equal to or above mine.", ephemeral=True
+            )
+        else:
+            try:
+                await member.timeout(
+                    timedelta(hours=WARN_TIMEOUT_HOURS),
+                    reason=audit_reason(f"Warning {warning_count}/{MAX_WARNINGS}: {reason}", "auto-timeout", bot.user),
+                )
+                timed_out = True
+            except discord.HTTPException as e:
+                print(f"❌ Auto-timeout failed for {member}: {e}")
+                await interaction.followup.send(f"⚠️ The warning was given, but the timeout failed: {e}", ephemeral=True)
+
+    # DM with the reason
+    info = (
         f"Active warnings: {warning_count}/{MAX_WARNINGS}. "
-        f"They clear after {WARNING_EXPIRE_DAYS} days without a new warning.",
+        f"They clear after {WARNING_EXPIRE_DAYS} days without a new warning."
     )
+    if timed_out:
+        info += f" You are also timed out for {WARN_TIMEOUT_HOURS} hours."
+    await dm_member(
+        member, guild, f"You received warning {warning_count}/{MAX_WARNINGS} in {guild.name}",
+        reason, 0xF5A623, info,
+    )
+
+    # timeout card (the "(for 2 hours)" part becomes the DURATION field on the card)
+    if timed_out:
+        t_reason = f"Warning {warning_count}/{MAX_WARNINGS} - {reason}"[:270] + f" (for {WARN_TIMEOUT_HOURS} hours)"
+        await issue_punishment(interaction, member, "TIMEOUT", t_reason)
 
     # ---- 3rd+ warning from someone who can't ban: no ban, ping the high rank ----
     if warning_count >= MAX_WARNINGS:
