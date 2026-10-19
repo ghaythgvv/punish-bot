@@ -93,11 +93,14 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from punishment_card import render_card, TYPE_STYLE
+from punishment_card import render_card, TYPE_STYLE, TITLE_WORD
 from punishment_gif import render_card_gif, clean_for_card, MAX_BYTES, BANNER_PATH
 
 # Own style for the green "warning cleared" card.
 TYPE_STYLE.setdefault("WARNING CLEARED", ((70, 220, 120), 100))
+# Warning 2 = warning + automatic timeout on ONE card: stamp "WARN + TIMEOUT", title "NEW WARNING".
+TYPE_STYLE.setdefault("WARN + TIMEOUT", ((255, 138, 61), 66))
+TITLE_WORD.setdefault("WARN + TIMEOUT", "WARNING")
 
 # Serialises every /warn: counting, card style, saving and roles happen one warn at a time.
 warning_lock = asyncio.Lock()
@@ -993,6 +996,7 @@ async def warn_cmd(interaction: discord.Interaction, member: discord.Member, rea
                         reason=audit_reason(f"Warning {warning_count}/{MAX_WARNINGS}: {reason}", "auto-timeout", bot.user),
                     )
                     timed_out = True
+                    card_type = "WARN + TIMEOUT"   # the stamp on the card shows both
                     # "(for 2 hours)" at the end becomes the DURATION field on the card
                     card_reason = f"{reason[:270]} (for {WARN_TIMEOUT_HOURS} hours)"
                 except discord.HTTPException as e:
