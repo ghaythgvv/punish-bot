@@ -29,10 +29,13 @@ Moderator role. And nobody can punish someone whose top role is equal to or abov
     - Only /unblacklist lifts it.
 
 What's new in v3.3
-    - The old Warn role is swapped for the new one in ONE role edit (WARN 1/3 -> WARN 2/3 is a single
-      audit-log entry, and the old role can never be left behind).
+    - EACH warning expires on its own 30 days after it was given: the bot reads the log every hour,
+      un-warns the member, fixes the Warn roles, posts the green card and DMs them.
+    - Warn roles stack: warning 1 = WARN 1, warning 2 = WARN 1 + WARN 2 (WARN 1 is NOT taken off).
+      Roles change in ONE role edit (a single audit-log entry).
     - Every /warn DMs the member the reason, the warning count and (on warning 2) the timeout.
-    - 2nd warning = automatic 2 hour timeout + a TIMEOUT card (WARN_TIMEOUT_AT / WARN_TIMEOUT_HOURS).
+    - 2nd warning = automatic 2 hour timeout, shown on the SAME warning card (DURATION field),
+      not a second card (WARN_TIMEOUT_AT / WARN_TIMEOUT_HOURS).
 
 What's new in v3.2
     - COMMAND WATCHDOG: every 10 minutes the bot checks that its slash commands still exist on Discord
@@ -478,8 +481,8 @@ def role_warning_level(guild: discord.Guild, member: discord.Member) -> int:
 
 
 async def update_warning_roles(guild: discord.Guild, member: discord.Member, count: int):
-    """1 warning: Warn 1 | 2 warnings: Warn 2 | 0 or 3+: none.
-    The old Warn role is swapped for the new one in ONE role edit (one audit-log entry)."""
+    """1 warning: Warn 1 | 2 warnings: Warn 1 + Warn 2 (Warn 1 is NOT taken off) | 0 or 3+: none.
+    Everything changes in ONE role edit (one audit-log entry)."""
     # A blacklisted member keeps only the blacklist role.
     if member.id in blacklist_records:
         return
@@ -490,7 +493,7 @@ async def update_warning_roles(guild: discord.Guild, member: discord.Member, cou
         print("⚠️ Warning role not found — check WARN_1_ROLE_ID / WARN_2_ROLE_ID")
         return
 
-    wanted = [warn1] if count == 1 else [warn2] if count == 2 else []
+    wanted = [warn1] if count == 1 else [warn1, warn2] if count == 2 else []
     current = [r for r in member.roles if not r.is_default()]
     base = [r for r in current if r not in (warn1, warn2)]
     new_roles = base + wanted
@@ -673,37 +676,32 @@ async def reject(interaction: discord.Interaction, command: str, target: discord
 # WARNING EXPIRATION
 # ================================================================
 async def expire_warnings():
-    """No new warning for WARNING_EXPIRE_DAYS -> the whole active streak is cleared."""
+    """EACH warning expires on its own, WARNING_EXPIRE_DAYS after the day it was given.
+    The bot reads the saved log, un-warns the member, fixes the Warn roles and posts the green card."""
     guild = bot.get_guild(GUILD_ID)
     if guild is None:
         return
 
     now = datetime.now(timezone.utc)
-    by_member: dict[int, list] = {}
+    limit = timedelta(days=WARNING_EXPIRE_DAYS)
+
+    expired: dict[int, list] = {}
     for case_no, record in punishment_records.items():
-        if _warning_is_active(record):
-            by_member.setdefault(record["user_id"], []).append((case_no, record))
-
-    changed = False
-
-    for member_id, records in by_member.items():
-        latest = max(
-            records,
-            key=lambda item: (_parse_warning_time(item[1]) or datetime.min.replace(tzinfo=timezone.utc), item[0]),
-        )
-        latest_time = _parse_warning_time(latest[1])
-
-        # Old records have no exact timestamp — don't guess their expiry.
-        if latest_time is None or now - latest_time < timedelta(days=WARNING_EXPIRE_DAYS):
+        if not _warning_is_active(record):
             continue
+        issued = _parse_warning_time(record)
+        # Old records have no exact timestamp - don't guess their expiry.
+        if issued is None or now - issued < limit:
+            continue
+        expired.setdefault(record["user_id"], []).append((case_no, record))
 
+    for member_id, items in expired.items():
         cleared_cases = []
-        for case_no, record in records:
+        for case_no, record in items:
             record["warning_active"] = False
             record["warning_cleared_at"] = now.isoformat()
             record["warning_clear_method"] = "automatic_30_day_expiry"
             cleared_cases.append(case_no)
-        changed = True
         save_db()   # saved BEFORE posting, so a crash can never post the same clear twice
 
         member = guild.get_member(member_id)
@@ -711,20 +709,26 @@ async def expire_warnings():
             continue   # left the server: cleared quietly, nothing to announce
 
         try:
-            await update_warning_roles(guild, member, 0)
+            remaining = active_warning_count(member_id)
+            await update_warning_roles(guild, member, min(remaining, MAX_WARNINGS - 1))
+
+            n = len(items)
             reason = (
-                f"No new warning was received for {WARNING_EXPIRE_DAYS} days. "
-                f"All active warnings were automatically cleared."
+                f"Warning expired after {WARNING_EXPIRE_DAYS} days. Active warnings left: {remaining}/{MAX_WARNINGS}."
+                if n == 1 else
+                f"{n} warnings expired after {WARNING_EXPIRE_DAYS} days. Active warnings left: {remaining}/{MAX_WARNINGS}."
             )
             punisher = guild.me or bot.user
             if punisher:
                 await post_warning_cleared_card(guild, member, punisher, reason, cleared_cases)
+            await dm_member(
+                member, guild, f"A warning expired in {guild.name}", reason, 0x57F287,
+                f"Active warnings left: {remaining}/{MAX_WARNINGS}.",
+            )
+            print(f"🟢 {n} warning(s) of {member} expired after {WARNING_EXPIRE_DAYS} days ({remaining} left)")
         except Exception:
             print(f"❌ Expiry follow-up failed for {member_id}:")
             traceback.print_exc()
-
-    if changed:
-        save_db()
 
 
 @tasks.loop(hours=1)
@@ -946,7 +950,7 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError):
 # ================================================================
 @bot.tree.command(
     name="warn",
-    description="Give a warning to a member. Warnings expire after 30 days without a new warning.",
+    description="Give a warning to a member. Each warning expires 30 days after it was given.",
     guild=GUILD,
 )
 @app_commands.describe(member="The member being warned", reason="Why they're being warned")
@@ -974,6 +978,27 @@ async def warn_cmd(interaction: discord.Interaction, member: discord.Member, rea
         if auto_ban:
             card_reason = f"{reason} - {MAX_WARNINGS} active warnings reached. Automatic ban applied."[:300]
 
+        # 2nd warning: the timeout is applied FIRST, so the SAME warning card can show the duration
+        # (one card for the warning + the timeout, not two).
+        timed_out = False
+        if warning_count == WARN_TIMEOUT_AT and not auto_ban:
+            if guild.me and member.top_role >= guild.me.top_role:
+                await interaction.followup.send(
+                    "⚠️ I can't time that member out: their highest role is equal to or above mine.", ephemeral=True
+                )
+            else:
+                try:
+                    await member.timeout(
+                        timedelta(hours=WARN_TIMEOUT_HOURS),
+                        reason=audit_reason(f"Warning {warning_count}/{MAX_WARNINGS}: {reason}", "auto-timeout", bot.user),
+                    )
+                    timed_out = True
+                    # "(for 2 hours)" at the end becomes the DURATION field on the card
+                    card_reason = f"{reason[:270]} (for {WARN_TIMEOUT_HOURS} hours)"
+                except discord.HTTPException as e:
+                    print(f"❌ Auto-timeout failed for {member}: {e}")
+                    await interaction.followup.send(f"⚠️ The warning is given, but the timeout failed: {e}", ephemeral=True)
+
         record_extra = {
             "warning_active": True,
             "warning_issued_at": discord.utils.utcnow().isoformat(),
@@ -982,17 +1007,30 @@ async def warn_cmd(interaction: discord.Interaction, member: discord.Member, rea
         }
         if auto_ban:
             record_extra["automatic_ban"] = True
+        if timed_out:
+            record_extra["auto_timeout_hours"] = WARN_TIMEOUT_HOURS
+
+        confirm_note = ""
+        if not auto_ban:
+            confirm_note = f"{bold('Active warnings:')} **{warning_count}/{MAX_WARNINGS}**."
+            if timed_out:
+                confirm_note += f" {bold(f'Timed out for {WARN_TIMEOUT_HOURS} hours.')}"
 
         case_no = await issue_punishment(
             interaction, member, "WARNING", card_reason,
             card_ptype=card_type,
             record_extra=record_extra,
-            confirm_note="" if auto_ban else f"{bold('Active warnings:')} **{warning_count}/{MAX_WARNINGS}**.",
+            confirm_note=confirm_note,
             severity=None if auto_ban else percent,   # a BAN card keeps its own 100% bar
         )
 
         if case_no is None:
             # Card failed before anything was saved: no record, so don't touch the roles.
+            if timed_out:
+                try:
+                    await member.timeout(None, reason="Warning card failed - timeout undone")
+                except discord.HTTPException:
+                    pass
             return
 
         # old Warn role is swapped for the new one in a single role edit
@@ -1024,28 +1062,10 @@ async def warn_cmd(interaction: discord.Interaction, member: discord.Member, rea
         return
 
     # ---- normal warning ----
-    # Warning WARN_TIMEOUT_AT (2nd) -> automatic timeout
-    timed_out = False
-    if warning_count == WARN_TIMEOUT_AT:
-        if guild.me and member.top_role >= guild.me.top_role:
-            await interaction.followup.send(
-                "⚠️ I can't time that member out: their highest role is equal to or above mine.", ephemeral=True
-            )
-        else:
-            try:
-                await member.timeout(
-                    timedelta(hours=WARN_TIMEOUT_HOURS),
-                    reason=audit_reason(f"Warning {warning_count}/{MAX_WARNINGS}: {reason}", "auto-timeout", bot.user),
-                )
-                timed_out = True
-            except discord.HTTPException as e:
-                print(f"❌ Auto-timeout failed for {member}: {e}")
-                await interaction.followup.send(f"⚠️ The warning was given, but the timeout failed: {e}", ephemeral=True)
-
     # DM with the reason
     info = (
         f"Active warnings: {warning_count}/{MAX_WARNINGS}. "
-        f"They clear after {WARNING_EXPIRE_DAYS} days without a new warning."
+        f"Each warning is removed automatically {WARNING_EXPIRE_DAYS} days after it was given."
     )
     if timed_out:
         info += f" You are also timed out for {WARN_TIMEOUT_HOURS} hours."
@@ -1053,11 +1073,6 @@ async def warn_cmd(interaction: discord.Interaction, member: discord.Member, rea
         member, guild, f"You received warning {warning_count}/{MAX_WARNINGS} in {guild.name}",
         reason, 0xF5A623, info,
     )
-
-    # timeout card (the "(for 2 hours)" part becomes the DURATION field on the card)
-    if timed_out:
-        t_reason = f"Warning {warning_count}/{MAX_WARNINGS} - {reason}"[:270] + f" (for {WARN_TIMEOUT_HOURS} hours)"
-        await issue_punishment(interaction, member, "TIMEOUT", t_reason)
 
     # ---- 3rd+ warning from someone who can't ban: no ban, ping the high rank ----
     if warning_count >= MAX_WARNINGS:
@@ -1472,8 +1487,8 @@ async def warnings_cmd(interaction: discord.Interaction, member: discord.User):
 
     times = [t for t in (_parse_warning_time(rec) for _, rec in active) if t]
     if times:
-        clears = max(times) + timedelta(days=WARNING_EXPIRE_DAYS)
-        embed.add_field(name=bold("Auto-clear"), value=discord.utils.format_dt(clears, "R"), inline=False)
+        clears = min(times) + timedelta(days=WARNING_EXPIRE_DAYS)   # the oldest warning expires first
+        embed.add_field(name=bold("Next warning expires"), value=discord.utils.format_dt(clears, "R"), inline=False)
     embed.set_footer(text=f"{len(active)}/{MAX_WARNINGS} active warnings")
     embed.set_thumbnail(url=member.display_avatar.url)
 
